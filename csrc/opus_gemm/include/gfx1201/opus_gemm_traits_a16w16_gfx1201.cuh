@@ -86,10 +86,10 @@ struct opus_gemm_a16w16_traits_gfx1201 {
     static constexpr int B_N = opus::get<1>(BLOCK{});
     static constexpr int B_K = opus::get<2>(BLOCK{});
 
-    using D_A   = typename DTYPE::a;
-    using D_B   = typename DTYPE::b;
-    using D_C   = typename DTYPE::c;
-    using D_ACC = typename DTYPE::acc;
+    using D_A   = opus::tuple_element_t<0, DTYPE>;
+    using D_B   = opus::tuple_element_t<1, DTYPE>;
+    using D_C   = opus::tuple_element_t<2, DTYPE>;
+    using D_ACC = opus::tuple_element_t<3, DTYPE>;
 
     static constexpr int T_M = opus::get<0>(TILE{});
     static constexpr int T_N = opus::get<1>(TILE{});
