@@ -27,11 +27,11 @@ namespace opus_gfx1201_pipeline {
 
 using opus::operator""_I;
 
-// Single-tile bf16 a16w16 GEMM kernel.
-// A: [M, K] row-major, B: [N, K] row-major (B is transposed weight), C: [M, N]
-// One workgroup (32 threads, wave32) computes the full 16x16 output.
+// Single-tile bf16 a16w16 GEMM kernel body (device function, launched by a
+// __global__ wrapper). One workgroup (32 threads, wave32) computes the full
+// 16x16 output.
 template <int BLOCK_M, int BLOCK_N>
-__global__ void gemm_a16w16_mono_tile_gfx1201_kernel(
+__device__ void gemm_a16w16_mono_tile_gfx1201_impl(
     const opus::bf16_t* __restrict__ A,   // [BLOCK_M, K]
     const opus::bf16_t* __restrict__ B,   // [BLOCK_N, K]  (B is N x K, transposed)
     opus::bf16_t* __restrict__ C,         // [BLOCK_M, BLOCK_N]

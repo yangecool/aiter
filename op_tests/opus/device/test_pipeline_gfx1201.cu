@@ -1,40 +1,44 @@
 // test_pipeline_gfx1201.cu — verify minimal opus_gemm bf16 GEMM on gfx1201
-// Follows test_wmma_gfx1201.cu's host/device dual-pass pattern.
+// Dual-pass pattern matching test_wmma_gfx1201.cu (proven to run).
+
 #ifdef __HIP_DEVICE_COMPILE__
 // ── Device pass ─────────────────────────────────────────────────────────────
 #include "opus/opus.hpp"
-#include "gfx1201/opus_gemm_pipeline_a16w16_gfx1201.cuh"
-
 #if defined(__gfx1201__) || defined(__gfx1200__)
 
-// Instantiate the 16x16 template so the host launcher can name it.
-template __global__ void opus_gfx1201_pipeline::gemm_a16w16_mono_tile_gfx1201_kernel<16, 16>(
-    const opus::bf16_t*, const opus::bf16_t*, opus::bf16_t*, int);
+#include "gfx1201/opus_gemm_pipeline_a16w16_gfx1201.cuh"
+
+// Re-export the 16x16 instantiation under the plain symbol the host stub names.
+// (host sees the same wmma_gfx12_pipe_kernel<bf16_t> declaration below)
+__global__ void gemm_pipe_kernel_bf16_16x16(
+    const opus::bf16_t* __restrict__ A,
+    const opus::bf16_t* __restrict__ B,
+    opus::bf16_t* __restrict__ C,
+    int K)
+{
+    opus_gfx1201_pipeline::gemm_a16w16_mono_tile_gfx1201_impl<16, 16>(A, B, C, K);
+}
 
 #endif
 
 #else
-// ── Host pass: extern "C" launcher + test driver ────────────────────────────
+// ── Host pass: empty kernel stub + extern "C" launcher + driver ─────────────
 #include "opus/opus.hpp"
+#include "opus/hip_minimal.hpp"
 #include <cstdio>
-#include <hip/hip_runtime.h>
 
-#define HIP_CHECK(x) do { auto e = (x); if (e != hipSuccess) { fprintf(stderr, "HIP err %d at %d\n", (int)e, __LINE__); return 1; } } while(0)
+// Host-side stub: same signature, empty body. The device pass defines the real one.
+__global__ void gemm_pipe_kernel_bf16_16x16(
+    const opus::bf16_t* A, const opus::bf16_t* B, opus::bf16_t* C, int K) {}
 
-template<typename T>
-__global__ void gemm_a16w16_mono_tile_gfx1201_kernel(
-    const T*, const T*, T*, int) {}
-
-extern "C" void run_gemm_pipe_gfx1201(
+extern "C" void run_gemm_pipe_bf16_16x16(
     const void* dA, const void* dB, void* dC, int K)
 {
-    hipLaunchKernelGGL(
-        (gemm_a16w16_mono_tile_gfx1201_kernel<opus::bf16_t>),
-        dim3(1), dim3(32), 0, 0,
-        static_cast<const opus::bf16_t*>(dA),
-        static_cast<const opus::bf16_t*>(dB),
-        static_cast<opus::bf16_t*>(dC), K);
-    hipGetLastError();
+    hipLaunchKernelGGL((gemm_pipe_kernel_bf16_16x16),
+                       dim3(1), 32, 0, 0,
+                       static_cast<const opus::bf16_t*>(dA),
+                       static_cast<const opus::bf16_t*>(dB),
+                       static_cast<opus::bf16_t*>(dC), K);
     hipDeviceSynchronize();
 }
 
@@ -51,14 +55,14 @@ int main() {
             hC_ref[m * N + n] = s;
         }
     opus::bf16_t *dA, *dB, *dC;
-    HIP_CHECK(hipMalloc(&dA, M * K * sizeof(opus::bf16_t)));
-    HIP_CHECK(hipMalloc(&dB, N * K * sizeof(opus::bf16_t)));
-    HIP_CHECK(hipMalloc(&dC, M * N * sizeof(opus::bf16_t)));
-    HIP_CHECK(hipMemcpy(dA, hA, M * K * sizeof(opus::bf16_t), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(dB, hB, N * K * sizeof(opus::bf16_t), hipMemcpyHostToDevice));
-    run_gemm_pipe_gfx1201(dA, dB, dC, K);
+    hipMalloc(&dA, M * K * sizeof(opus::bf16_t));
+    hipMalloc(&dB, N * K * sizeof(opus::bf16_t));
+    hipMalloc(&dC, M * N * sizeof(opus::bf16_t));
+    hipMemcpy(dA, hA, M * K * sizeof(opus::bf16_t), hipMemcpyHostToDevice);
+    hipMemcpy(dB, hB, N * K * sizeof(opus::bf16_t), hipMemcpyHostToDevice);
+    run_gemm_pipe_bf16_16x16(dA, dB, dC, K);
     opus::bf16_t hC[M * N];
-    HIP_CHECK(hipMemcpy(hC, dC, M * N * sizeof(opus::bf16_t), hipMemcpyDeviceToHost));
+    hipMemcpy(hC, dC, M * N * sizeof(opus::bf16_t), hipMemcpyDeviceToHost);
     float max_diff = 0;
     for (int i = 0; i < M * N; ++i) {
         float d = float(hC[i]) - hC_ref[i];
@@ -67,7 +71,7 @@ int main() {
     }
     printf("gfx1201 opus_gemm bf16 GEMM (16x16x%d): max_diff = %f %s\n",
            K, max_diff, max_diff < 1.0f ? "PASS" : "FAIL");
-    HIP_CHECK(hipFree(dA)); HIP_CHECK(hipFree(dB)); HIP_CHECK(hipFree(dC));
+    hipFree(dA); hipFree(dB); hipFree(dC);
     return max_diff < 1.0f ? 0 : 1;
 }
 #endif
