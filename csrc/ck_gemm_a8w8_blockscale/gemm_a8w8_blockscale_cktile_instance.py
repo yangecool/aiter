@@ -153,7 +153,7 @@ default_kernels_cktile_dict = {
 
 
 arch = get_gfx()
-if arch.startswith("gfx95"):
+if arch.startswith("gfx95") or arch.startswith("gfx120"):
     candidate_kernels_cktile_dict = expand_blockpercu(kernels_list_95x)
 else:
     candidate_kernels_cktile_dict = expand_blockpercu(kernels_list_942)
