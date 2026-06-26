@@ -16,6 +16,7 @@ enum class OpusGfxArch
     Gfx950,
     Gfx942,
     Gfx1250,
+    Gfx1201,  // RDNA4 (Navi 48): WMMA-128b, wave32
     // future: Gfx940, Gfx1100, ...
 };
 
@@ -52,6 +53,10 @@ inline const opus_arch_detail::OpusArchInfo &opus_get_arch_info()
         else if (name.rfind("gfx1250", 0) == 0)
         {
             a = OpusGfxArch::Gfx1250;
+        }
+        else if (name.rfind("gfx1201", 0) == 0)
+        {
+            a = OpusGfxArch::Gfx1201;
         }
         return OpusArchInfo{a, std::move(name), dev};
     }();
