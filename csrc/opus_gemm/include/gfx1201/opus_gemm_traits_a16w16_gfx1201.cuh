@@ -28,9 +28,16 @@ using opus::operator""_I;
 // ── WMMA-128b geometry constants (gfx1201, wave32) ──────────────────────
 // Single WMMA instruction: 16x16x16 (M x N x K). K-dim width = 16, i.e.
 // one WMMA consumes 16 elements along the contraction axis. Compare:
-//   gfx950  MFMA       16x16x32  (W_K=32)
-//   gfx1250 WMMA-256b  16x16x64/128 (W_K=64/128)
+//   gfx950  MFMA       16x16x32  (W_K=32, MFMA single instruction)
+//   gfx1250 SWMMAC     16x16x32  (W_K=32, SWMMAC single instruction; gfx1201 lacks SWMMAC)
 //   gfx1201 WMMA-128b  16x16x16  (W_K=16)  <-- this file
+//
+// For pipelines that want K=32 (matching gfx950/gfx1250), gfx1201 uses the
+// STEP_K path: two 16x16x16 WMMA builtins chained (opus.hpp L2458
+// DISPATCH_WMMA_GFX12_F32_STEP_K_). Verified: compiles clean on gfx1201
+// (test_stepk.cu --offload-arch=gfx1201 EXIT=0). ISA PDF p.100 confirms
+// gfx1201 has only V_WMMA_F32_16X16X16_BF16 (K=16); the 16x16x32 variants
+// are V_SWMMAC_* (gfx1250 only).
 static constexpr int WMMA_M = 16;
 static constexpr int WMMA_N = 16;
 static constexpr int WMMA_K = 16;
