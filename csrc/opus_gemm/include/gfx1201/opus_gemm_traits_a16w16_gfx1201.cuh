@@ -29,15 +29,21 @@ using opus::operator""_I;
 // Single WMMA instruction: 16x16x16 (M x N x K). K-dim width = 16, i.e.
 // one WMMA consumes 16 elements along the contraction axis. Compare:
 //   gfx950  MFMA       16x16x32  (W_K=32, MFMA single instruction)
-//   gfx1250 SWMMAC     16x16x32  (W_K=32, SWMMAC single instruction; gfx1201 lacks SWMMAC)
+//   gfx1250 WMMA       16x16x32  (W_K=32, __builtin_amdgcn_wmma_f32_16x16x32_bf16
+//                                 needs gfx1250-insts; gfx1201 lacks it)
 //   gfx1201 WMMA-128b  16x16x16  (W_K=16)  <-- this file
+//
+// Note: RDNA4 ISA p.100 lists BOTH V_WMMA_F32_16X16X16_BF16 (K=16) and
+// V_SWMMAC_F32_16X16X32_BF16 (K=32). The clang wmma_f32_16x16x32_bf16
+// builtin maps to the gfx1250 WMMA path (needs gfx1250-insts), NOT the
+// SWMMAC path. SWMMAC builtins are not yet exposed by clang; gfx1201
+// can't reach 16x16x32 via a single wmma builtin today.
 //
 // For pipelines that want K=32 (matching gfx950/gfx1250), gfx1201 uses the
 // STEP_K path: two 16x16x16 WMMA builtins chained (opus.hpp L2458
 // DISPATCH_WMMA_GFX12_F32_STEP_K_). Verified: compiles clean on gfx1201
 // (test_stepk.cu --offload-arch=gfx1201 EXIT=0). ISA PDF p.100 confirms
-// gfx1201 has only V_WMMA_F32_16X16X16_BF16 (K=16); the 16x16x32 variants
-// are V_SWMMAC_* (gfx1250 only).
+// gfx1201 has V_WMMA_F32_16X16X16_BF16 (K=16).
 static constexpr int WMMA_M = 16;
 static constexpr int WMMA_N = 16;
 static constexpr int WMMA_K = 16;
