@@ -1,99 +1,72 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 //
-// opus_gemm_arch_gfx1201.cuh — gfx1201 dispatch + launcher.
+// opus_gemm_arch_gfx1201.cuh — gfx1201 (RDNA4 / Navi 48) dispatch skeleton.
 //
-// Provides:
-//   opus_dispatch_a16w16_gfx1201<T>(M,N,K,batch,has_bias) → kernel pointer
-//   opus_a16w16_tune_dispatch_gfx1201<T>(id) → tune dispatch (stub)
+// gfx1201 uses WMMA-128b (wave32, 16x16x16) — a different instruction
+// family from gfx950 (MFMA 16x16x32) and gfx1250 (WMMA-256b). The opus
+// framework already has the gfx12 w32 WMMA builtins wired (opus.hpp
+// L2448-2455, verified PASS bit-exact on RX 9070 XT), and this header
+// gives opus_gemm a per-arch entry point for gfx1201 so the top-level
+// router (opus_gemm.cu) recognises the device instead of hitting the
+// generic "only gfx950" fallback.
 //
-// Tensile-aligned MIWaveTile [4,4] pipeline: 128x128 tile, 4-wave, 128t.
+// The traits geometry is fixed in opus_gemm_traits_a16w16_gfx1201.cuh
+// (WMMA 16x16x16, MacroTile 64x16, derived from hipBLASLt gfx1201 tuned
+// solutions MatrixInstruction [16,16,16,1]). The pipeline kernel body —
+// the WMMA-128b emission loop with gfx1201 register layout — is NOT yet
+// ported; it needs a layout distinct from gfx950's MFMA body. Until it
+// lands, dispatch raises a clear "pipeline not yet implemented" error
+// rather than a misleading "unsupported arch".
+//
+// To complete: implement opus_gemm_pipeline_a16w16_*_gfx1201.cuh kernels
+// (mirror gfx950 pipeline structure, swap MFMA -> WMMA-128b via
+// DISPATCH_WMMA_GFX12_F32_ macros), then replace the stub bodies below
+// with real heuristic dispatch.
 #pragma once
 
 #include "../opus_gemm_arch.cuh"
 #include "../opus_gemm_common.cuh"
-#include "aiter_tensor.h"
+#include "aiter_tensor.h"  // aiter_tensor_t (used in OpusA16W16NoscaleKernel signature)
 #include "opus_gemm_traits_a16w16_gfx1201.cuh"
-#include "opus_gemm_pipeline_a16w16_gfx1201.cuh"
 
 #include <cstddef>
-#include <cstdint>
 
 namespace opus_gfx1201_detail {
 
+// Function-pointer type — identical shape to gfx950's so the top-level
+// router can store the result uniformly. Until a real kernel is linked,
+// the pointers stay nullptr and dispatch raises.
 using OpusA16W16NoscaleKernel = void (*)(
     aiter_tensor_t &, aiter_tensor_t &,
     aiter_tensor_t &, std::optional<aiter_tensor_t>, int);
 
-// ── Minimal kargs (packed for kernel launch) ─────────────────────────────
-struct opus_gemm_noscale_kargs_gfx1201 {
-    const void* ptr_a;
-    const void* ptr_b;
-    void*       ptr_c;
-    int m;
-    int n;
-    int k;
-    int stride_a;   // in elements
-    int stride_b;
-    int stride_c;
-};
+}  // namespace opus_gfx1201_detail
 
-// ── Grid-walk + pipeline kernel ───────────────────────────────────────────
-template <int BLOCK_M, int BLOCK_N>
-__global__ void gemm_a16w16_gfx1201_kernel(opus_gemm_noscale_kargs_gfx1201 kargs)
-{
-    // Single-block launch for now: one workgroup handles one BLOCK_M x BLOCK_N tile.
-    // Future: grid launch with column-major walk.
-    if (blockIdx.x == 0 && blockIdx.y == 0) {
-        using D_A = opus::bf16_t;
-        gemm_a16w16_big_tile_gfx1201_impl<BLOCK_M, BLOCK_N>(
-            static_cast<const D_A*>(kargs.ptr_a),
-            static_cast<const D_A*>(kargs.ptr_b),
-            static_cast<D_A*>(kargs.ptr_c),
-            kargs.k);
-    }
-}
+// ── Dispatch entry points (stub: pipeline kernels not yet ported) ─────────
+// These match the gfx950 signatures so opus_gemm.cu's `case OpusGfxArch::Gfx1201`
+// branch compiles and links. They raise a precise, actionable error so the
+// failure mode is distinguishable from "arch unknown".
 
-// ── Host-side launcher ────────────────────────────────────────────────────
-template <int BLOCK_M, int BLOCK_N>
-void launch_gemm_a16w16_gfx1201(
-    aiter_tensor_t &a, aiter_tensor_t &b,
-    aiter_tensor_t &c, std::optional<aiter_tensor_t> bias,
-    int /*split_k*/)
-{
-    (void)bias;
-    opus_gemm_noscale_kargs_gfx1201 kargs;
-    kargs.ptr_a   = a.data;
-    kargs.ptr_b   = b.data;
-    kargs.ptr_c   = c.data;
-    kargs.m       = static_cast<int>(a.size[0]);
-    kargs.n       = static_cast<int>(b.size[0]);
-    kargs.k       = static_cast<int>(a.size[1]);
-    kargs.stride_a = static_cast<int>(a.stride[0] ? a.stride[0] : a.size[1]);
-    kargs.stride_b = static_cast<int>(b.stride[0] ? b.stride[0] : b.size[1]);
-    kargs.stride_c = static_cast<int>(c.stride[0] ? c.stride[0] : b.size[0]);
-
-    // Determine grid: ceil_div(M/BLOCK_M) × ceil_div(N/BLOCK_N)
-    int grid_m = (kargs.m + BLOCK_M - 1) / BLOCK_M;
-    int grid_n = (kargs.n + BLOCK_N - 1) / BLOCK_N;
-
-    gemm_a16w16_gfx1201_kernel<BLOCK_M, BLOCK_N>
-        <<<dim3(grid_m, grid_n, 1), dim3(128, 1, 1)>>>(kargs);
-}
-
-// ── Kernel lookup (host-side function that returns launcher pointer) ──────
 template <typename CDataType>
-OpusA16W16NoscaleKernel
-opus_dispatch_a16w16_gfx1201(int M, int N, int K, int batch, bool has_bias)
+opus_gfx1201_detail::OpusA16W16NoscaleKernel
+opus_dispatch_a16w16_gfx1201(int M, int N, int K, int batch, bool has_bias = false)
 {
     (void)M; (void)N; (void)K; (void)batch; (void)has_bias;
-    // For now: always use 128x128 big tile.  Heuristic dispatch (pick tile
-    // size based on M/N) can be added later.
-    return &launch_gemm_a16w16_gfx1201<128, 128>;
+    const auto &info = opus_get_arch_info();
+    AITER_CHECK(false,
+                "opus_gemm: a16w16 dispatch for gfx1201 (WMMA-128b) is not yet "
+                "implemented. The opus WMMA builtins are verified working "
+                "(test_wmma_gfx1201 PASS), and the traits geometry is fixed "
+                "(WMMA 16x16x16, MacroTile 64x16, hipBLASLt-derived). "
+                "Pipeline kernel bodies remain to be ported. "
+                "Current device ", info.dev, " gcnArchName='", info.name, "'.");
 }
 
-// ── Tune dispatch (stub) ──────────────────────────────────────────────────
-struct OpusA16W16TuneKernelGfx1201 { int kid; };
+// Tune dispatch (id-based) — also a stub.
+struct OpusA16W16TuneKernelGfx1201 {
+    int kid;
+};
 
 template <typename CDataType>
 OpusA16W16TuneKernelGfx1201
@@ -103,7 +76,6 @@ opus_a16w16_tune_dispatch_gfx1201(int id)
     const auto &info = opus_get_arch_info();
     AITER_CHECK(false,
                 "opus_gemm: a16w16 tune dispatch for gfx1201 is not yet "
-                "implemented.");
+                "implemented (pipeline kernels pending). "
+                "Current device ", info.dev, " gcnArchName='", info.name, "'.");
 }
-
-}  // namespace opus_gfx1201_detail
