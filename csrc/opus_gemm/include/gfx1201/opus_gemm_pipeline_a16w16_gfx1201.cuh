@@ -21,7 +21,6 @@
 
 #include <opus/opus.hpp>
 
-#if defined(__gfx1201__) || defined(__gfx1200__)
 
 namespace opus_gfx1201_pipeline {
 
@@ -91,4 +90,3 @@ __device__ void gemm_a16w16_mono_tile_gfx1201_impl(
 
 }  // namespace opus_gfx1201_pipeline
 
-#endif  // __gfx1201__ / __gfx1200__
