@@ -15,6 +15,9 @@
 #ifdef OPUS_BUILD_HAS_GFX1250
 #include "gfx1250/opus_gemm_arch_gfx1250.cuh"      // opus_a16w16_tune_dispatch_gfx1250<T> (tune-id entry only)
 #endif
+#ifdef OPUS_BUILD_HAS_GFX1201
+#include "gfx1201/opus_gemm_arch_gfx1201.cuh"      // opus_dispatch_a16w16_gfx1201<T> (WMMA-128b skeleton)
+#endif
 #include "opus_gemm_common.cuh"
 #include "gfx950/opus_gemm_heuristic_dispatch_gfx950.cuh"  // OpusA16W16NoscaleKernel
 #ifdef OPUS_BUILD_HAS_GFX942
@@ -67,6 +70,10 @@ OpusA16W16NoscaleKernel opus_dispatch_a16w16(int M, int N, int K, int batch, boo
     case OpusGfxArch::Gfx1250:
       return opus_dispatch_a16w16_gfx1250<CDataType>(M, N, K, batch, has_bias);
 #endif
+#ifdef OPUS_BUILD_HAS_GFX1201
+    case OpusGfxArch::Gfx1201:
+      return opus_dispatch_a16w16_gfx1201<CDataType>(M, N, K, batch, has_bias);
+#endif
     default:
     {
       const auto &info = opus_get_arch_info();
@@ -95,6 +102,16 @@ opus_a16w16_tune_dispatch(int id)
 #ifdef OPUS_BUILD_HAS_GFX1250
     case OpusGfxArch::Gfx1250:
       return opus_a16w16_tune_dispatch_gfx1250<CDataType>(id);
+#endif
+#ifdef OPUS_BUILD_HAS_GFX1201
+    case OpusGfxArch::Gfx1201:
+    {
+      const auto &info = opus_get_arch_info();
+      AITER_CHECK(false,
+                  "opus_gemm_a16w16_tune: gfx1201 (WMMA-128b) tune dispatch is "
+                  "not yet implemented (pipeline kernels pending). "
+                  "Current device ", info.dev, " gcnArchName='", info.name, "'.");
+    }
 #endif
     default:
     {
