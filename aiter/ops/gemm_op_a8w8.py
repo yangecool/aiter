@@ -28,7 +28,7 @@ aiter_lib = Library("aiter", "FRAGMENT")
 # Arches whose prebuilt HIP CK blockscale modules ship matching code objects.
 # Other arches (e.g. gfx1201) SIGSEGV uncatchably at kernel launch, so gate
 # before the HIP call rather than try/except. Extend when prebuilts add archs.
-_BLOCKSCALE_HIP_PREBUILT_ARCHES = frozenset({"gfx940", "gfx941", "gfx942", "gfx950"})
+_BLOCKSCALE_HIP_PREBUILT_ARCHES = frozenset({"gfx940", "gfx941", "gfx942", "gfx950", "gfx1201"})
 
 
 def _hip_blockscale_supported() -> bool:
