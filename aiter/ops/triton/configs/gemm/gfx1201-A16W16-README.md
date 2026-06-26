@@ -1,20 +1,36 @@
 # gfx1201 (RDNA4) GEMM A16W16 调优配置 — 起点
 
-本目录新增三个 gfx1201 的 GEMM-A16W16 系列 Triton 调优配置，填补 gfx1201 在 BF16 矩阵乘上的配置空白。
+本目录为 gfx1201 (RDNA4) 补齐了 GEMM-A16W16 系列 Triton 调优配置，填补了此前 A16W16（BF16 矩阵乘）完全缺失的空白。
 
 ## 背景
 
-gfx1201 此前仅有 45 个 `GEMM-A8W8*`（FP8 量化权重）Triton 配置，`GEMM-A16W16*`（非量化 BF16 矩阵乘）系列**完全缺失**。而 gfx950 有 10 个、gfx1250 有 8 个 A16W16 配置。
+gfx1201 此前仅有 A8W8*（FP8 量化权重）Triton 配置，`GEMM-A16W16*`（非量化 BF16 矩阵乘）系列**完全缺失**。而 gfx950 有 10 个、gfx1250 有 8 个 A16W16 配置。
 
 A16W16 是最通用的 GEMM 变体——任何 BF16 模型推理的线性层都走它。配置缺失的后果是：gfx1201 上调用 `aiter` 的 A16W16 GEMM 时，`get_gemm_config("GEMM-A16W16", M, N, K)` 因文件不存在直接报 `AssertionError: Required config file doesn't exist`（`gemm_config_utils.py` L86 `fpath_should_exist=True`），上层（如 ATOM）被迫回退到 `torch.nn.functional.linear`。这已由 ATOM PR #811 实测印证。
 
-## 新增文件
+## 配置清单（共 11 个 A16W16 文件）
 
-| 文件 | 对应 kernel | 说明 |
-|---|---|---|
-| `gfx1201-GEMM-A16W16.json` | `aiter.ops.triton.gemm.basic.gemm_a16w16`（Triton `_gemm_a16_w16_kernel`） | 通用 A16W16，9 个 M 档 |
-| `gfx1201-GEMM-A16W16-ATOMIC.json` | `aiter.ops.triton.gemm.basic.gemm_a16w16_atomic` | atomic 归约变体 |
-| `gfx1201-BATCHED_GEMM-A16W16.json` | batched A16W16 | 大 M 场景（M_GEQ_4096 档） |
+### 通用档（M-bucket，兜底任意形状）
+| 文件 | 说明 |
+|---|---|
+| `gfx1201-GEMM-A16W16.json` | 通用 A16W16，9 个 M 档（M_LEQ_8..2048 + any） |
+| `gfx1201-GEMM-A16W16-ATOMIC.json` | atomic 归约变体 |
+| `gfx1201-BATCHED_GEMM-A16W16.json` | batched A16W16（M_GEQ_4096 大 M 场景） |
+
+### Per-shape 专用档（对标 gfx950/gfx1250 常见推理形状）
+| 文件 | 来源 |
+|---|---|
+| `gfx1201-GEMM-A16W16-N=128-K=4096.json` | gfx950/gfx1250 |
+| `gfx1201-GEMM-A16W16-N=128-K=3072.json` | gfx1250 |
+| `gfx1201-GEMM-A16W16-N=2880-K=4096.json` | gfx950/gfx1250 |
+| `gfx1201-GEMM-A16W16-N=4096-K=4096.json` | square 通用 |
+| `gfx1201-GEMM-A16W16-N=5120-K=2880.json` | gfx950/gfx1250 |
+| `gfx1201-GEMM-A16W16-N=7168-K=16384.json` | gfx1250 |
+
+### Fused 变体
+| 文件 | 说明 |
+|---|---|
+| `gfx1201-FF-A16W16-fused.json` | Feed-Forward fused GEMM（gfx950/gfx1250 均有） |
 
 ## Schema
 
