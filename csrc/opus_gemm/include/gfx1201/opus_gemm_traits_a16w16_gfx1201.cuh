@@ -3,20 +3,16 @@
 //
 // opus_gemm_traits_a16w16_gfx1201.cuh — a16w16 (bf16) traits for gfx1201.
 //
-// gfx1201 (RDNA4 / Navi 48) uses WMMA-128b (wave32) instructions:
-//   wmma_f32_16x16x16_bf16_w32_gfx12  (MatrixInstruction [16, 16, 16, 1])
-// This differs from gfx950 (MFMA, 16x16x32) and gfx1250 (WMMA-256b,
-// 16x16x{64,128}). The pipeline geometry here is derived from the tuned
-// hipBLASLt gfx1201 Tensile solutions
-// (MatrixInstruction [16,16,16,1], MacroTile {64,16}, MIWaveGroup [4,1],
-// DepthU 32, WorkGroup [64,2,1]) — i.e. the same WMMA width AMD's own
-// library tunes for this silicon.
+// Geometry derived from hipBLASLt Tensile tuned solutions for gfx1201:
+//   Solution                    MacroTile  Waves  MIWaveTile  DepthU
+//   SB_UserArgs (small BF16)    32×64      1      2×4=8       16
+//   BBS_BH_Bias (big BF16)     128×128     4      4×4=16      32
+//   HHS_BH_Bias (FP16)         128×128     4      4×4=16      32
+//   F8F8S_BH (FP8)             128×128     4      4×4=16      64
 //
-// Status: traits skeleton. Pipeline kernel bodies (the WMMA emission loop
-// with gfx1201 register layout) are NOT yet ported — they require a
-// WMMA-128b register layout distinct from gfx950's MFMA body. This header
-// fixes the geometry so a future opus_gemm_pipeline_*_gfx1201.cuh can be
-// filled in against stable constants.
+// All share: WMMA 16×16×16, wave32, WorkGroup [32,4,1]=128 threads.
+// Key insight: waves split output tile spatially (2×2 grid), each wave
+// internally iterates MIWaveTile [4,4] WMMA tiles for its 64×64 sub-block.
 #pragma once
 
 #include "../opus_gemm_utils.cuh"
@@ -25,66 +21,49 @@ namespace opus_gfx1201_detail {
 
 using opus::operator""_I;
 
-// ── WMMA-128b geometry constants (gfx1201, wave32) ──────────────────────
-// Single WMMA instruction: 16x16x16 (M x N x K). K-dim width = 16, i.e.
-// one WMMA consumes 16 elements along the contraction axis. Compare:
-//   gfx950  MFMA       16x16x32  (W_K=32, MFMA single instruction)
-//   gfx1250 WMMA       16x16x32  (W_K=32, __builtin_amdgcn_wmma_f32_16x16x32_bf16
-//                                 needs gfx1250-insts; gfx1201 lacks it)
-//   gfx1201 WMMA-128b  16x16x16  (W_K=16)  <-- this file
-//
-// Note: RDNA4 ISA p.100 lists BOTH V_WMMA_F32_16X16X16_BF16 (K=16) and
-// V_SWMMAC_F32_16X16X32_BF16 (K=32). The clang wmma_f32_16x16x32_bf16
-// builtin maps to the gfx1250 WMMA path (needs gfx1250-insts), NOT the
-// SWMMAC path. SWMMAC builtins are not yet exposed by clang; gfx1201
-// can't reach 16x16x32 via a single wmma builtin today.
-//
-// For pipelines that want K=32 (matching gfx950/gfx1250), gfx1201 uses the
-// STEP_K path: two 16x16x16 WMMA builtins chained (opus.hpp L2458
-// DISPATCH_WMMA_GFX12_F32_STEP_K_). Verified: compiles clean on gfx1201
-// (test_stepk.cu --offload-arch=gfx1201 EXIT=0). ISA PDF p.100 confirms
-// gfx1201 has V_WMMA_F32_16X16X16_BF16 (K=16).
+// ── WMMA-128b constants (fixed for gfx1201) ──────────────────────────────
 static constexpr int WMMA_M = 16;
 static constexpr int WMMA_N = 16;
 static constexpr int WMMA_K = 16;
-static constexpr int WMMA_WAVE = 32;   // wave32 on gfx1201
+static constexpr int WMMA_WAVE = 32;  // wave32
 
-// MacroTile from hipBLASLt tuned solution (F8B8HS): MacroTile0=64,
-// MacroTile1=16, MIWaveGroup=[4,1]. For bf16 a16w16 we keep the same
-// wave-per-M count (4 waves cover M=64 with W_M=16) and N=16.
-// BLOCK = 64 x 16 x K, TILE = (4,1,1), WAVE = (16,16,16).
-static constexpr int B_M_DEFAULT = 64;
-static constexpr int B_N_DEFAULT = 16;
-static constexpr int B_K_DEFAULT = 64;   // 4x WMMA_K steps per K iteration
-static constexpr int T_M_DEFAULT = 4;
-static constexpr int T_N_DEFAULT = 1;
-static constexpr int T_K_DEFAULT = 1;
-static constexpr int BLOCK_SIZE_DEFAULT = T_M_DEFAULT * T_N_DEFAULT * T_K_DEFAULT * WMMA_WAVE;
-// = 4*1*1*32 = 128 threads
+// ── Small tile (SB_UserArgs_MT32x64x16, 1 wave) ─────────────────────────
+static constexpr int SMALL_B_M = 32;
+static constexpr int SMALL_B_N = 64;
+static constexpr int SMALL_B_K = 64;
+static constexpr int SMALL_T_M = 1;
+static constexpr int SMALL_T_N = 1;
+static constexpr int SMALL_T_K = 1;
+static constexpr int SMALL_BLOCK_SIZE = 32;  // 1 wave
+static constexpr int SMALL_E_M = SMALL_B_M / (WMMA_M * SMALL_T_M);  // 2
+static constexpr int SMALL_E_N = SMALL_B_N / (WMMA_N * SMALL_T_N);  // 4
+static constexpr int SMALL_E_K = SMALL_B_K / (WMMA_K * SMALL_T_K);  // 4
 
-static_assert(BLOCK_SIZE_DEFAULT == 128, "gfx1201 mono-tile BLOCK_SIZE must be 128");
-static_assert(B_M_DEFAULT % (WMMA_M * T_M_DEFAULT) == 0, "B_M must be WMMA_M * T_M * n");
-static_assert(B_N_DEFAULT % (WMMA_N * T_N_DEFAULT) == 0, "B_N must be WMMA_N * T_N");
-static_assert(B_K_DEFAULT % (WMMA_K * T_K_DEFAULT) == 0, "B_K must be WMMA_K * T_K");
+// ── Big tile (BBS/HHS, 4-wave, 128×128×DepthU) ──────────────────────────
+static constexpr int BIG_B_M = 128;
+static constexpr int BIG_B_N = 128;
+static constexpr int BIG_B_K = 64;         // 4 K-steps per iteration
+static constexpr int BIG_T_M = 2;
+static constexpr int BIG_T_N = 2;
+static constexpr int BIG_T_K = 1;
+static constexpr int BIG_BLOCK_SIZE = 128; // 4 waves × 32
 
-// K-dim WMMA steps per B_K iteration (hipBLASLt DepthU=32 => 2 steps for
-// bf16 at W_K=16; we use B_K=64 => 4 steps for fuller pipelining within
-// LDS budget — 2*64*(64+16)*2 bytes = 20480 bytes << 128 KiB).
-static constexpr int E_K_DEFAULT = B_K_DEFAULT / (WMMA_K * T_K_DEFAULT);
+// Per-wave sub-block: 64×64, MIWaveTile [4,4]
+static constexpr int BIG_WAVE_SUB_M = BIG_B_M / BIG_T_M;     // 64
+static constexpr int BIG_WAVE_SUB_N = BIG_B_N / BIG_T_N;     // 64
+static constexpr int BIG_E_M = BIG_WAVE_SUB_M / WMMA_M;      // 4
+static constexpr int BIG_E_N = BIG_WAVE_SUB_N / WMMA_N;      // 4
+static constexpr int BIG_E_K = BIG_B_K / (WMMA_K * BIG_T_K); // 4
 
-// LDS budget check (bf16, 2 bytes/element, async double-buffer):
-//   LDS = num_stages * (B_M*BK*2 + B_N*BK*2) bytes
-//   B_M=64 B_N=16 B_K=64 stages=2 => 2*(64*64*2 + 16*64*2) = 2*(8192+2048) = 20480
-//   << 128 KiB (131072). Comfortable; room for 3+ stages if beneficial.
-static constexpr int LDS_BYTES_MONO_TILE_2STG =
-    2 * (B_M_DEFAULT * B_K_DEFAULT * 2 + B_N_DEFAULT * B_K_DEFAULT * 2);
-static_assert(LDS_BYTES_MONO_TILE_2STG <= 131072,
-              "gfx1201 mono-tile a16w16 LDS must fit 128 KiB");
+// LDS budget (bf16, 2 bytes/elem, 2-stage):
+//   BIG:  2*(128*64*2 + 128*64*2) = 65536 bytes = 64 KiB << 128 KiB
+//   SMALL: 2*(32*64*2 + 64*64*2)  = 24576 bytes = 24 KiB << 128 KiB
+static constexpr int BIG_LDS_2STG = 2 * (BIG_B_M * BIG_B_K * 2 + BIG_B_N * BIG_B_K * 2);
+static_assert(BIG_LDS_2STG <= 131072, "gfx1201 big tile LDS must fit 128 KiB");
+static constexpr int SMALL_LDS_2STG = 2 * (SMALL_B_M * SMALL_B_K * 2 + SMALL_B_N * SMALL_B_K * 2);
+static_assert(SMALL_LDS_2STG <= 131072, "gfx1201 small tile LDS must fit 128 KiB");
 
-// ── Traits struct (mirrors gfx950 shape; usable by future pipeline) ──────
-// Parameterised so the eventual pipeline kernel can specialise on dtype /
-// vec width. WAVE is locked to (16,16,16) — the only WMMA width gfx1201
-// has for bf16.
+// ── Traits struct ────────────────────────────────────────────────────────
 template<int BLOCK_SIZE_,
          typename BLOCK_,
          typename DTYPE_,
@@ -117,21 +96,22 @@ struct opus_gemm_a16w16_traits_gfx1201 {
     static constexpr int T_K = opus::get<2>(TILE{});
 
     static_assert(BLOCK_SIZE / WMMA_WAVE == T_M * T_N * T_K,
-                  "BLOCK_SIZE / wave == T_M * T_N * T_K must hold");
+                  "BLOCK_SIZE/wave must equal T_M*T_N*T_K");
 
     static constexpr int W_M = opus::get<0>(WAVE{});
     static constexpr int W_N = opus::get<1>(WAVE{});
     static constexpr int W_K = opus::get<2>(WAVE{});
 
-    // gfx1201 WMMA-128b: the ONLY legal instruction width for bf16/fp8 is
-    // 16x16x16. Reject anything wider — gfx1250's 16x16x{64,128} builtins
-    // do not exist on gfx1201.
     static_assert(W_M == WMMA_M && W_N == WMMA_N && W_K == WMMA_K,
-                  "gfx1201 only has WMMA 16x16x16 (WMMA-128b, wave32); "
-                  "16x16x{32,64,128} are gfx1250-only.");
+                  "gfx1201 WMMA must be 16x16x16");
 
-    static constexpr int E_M = B_M / (W_M * T_M);
-    static constexpr int E_N = B_N / (W_N * T_N);
+    // Spatial wave partition: each wave covers B_M/T_M × B_N/T_N sub-block.
+    static constexpr int WAVE_SUB_M = B_M / T_M;
+    static constexpr int WAVE_SUB_N = B_N / T_N;
+
+    // MIWaveTile: WMMA tiles per wave (per sub-block).
+    static constexpr int E_M = WAVE_SUB_M / W_M;
+    static constexpr int E_N = WAVE_SUB_N / W_N;
     static constexpr int E_K = B_K / (W_K * T_K);
 
     static constexpr int VEC_A = opus::get<0>(VEC{});
@@ -141,8 +121,7 @@ struct opus_gemm_a16w16_traits_gfx1201 {
     using D_BIAS = D_BIAS_;
     static constexpr bool HAS_OOB = HAS_OOB_;
 
-    // Sanity: wave must be 32 on gfx1201 (WMMA-128b is _w32_gfx12).
-    static_assert(WMMA_WAVE == 32, "gfx1201 WMMA-128b requires wave32");
+    static_assert(WMMA_WAVE == 32, "gfx1201 requires wave32");
 };
 
 }  // namespace opus_gfx1201_detail
