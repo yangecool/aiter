@@ -27,9 +27,10 @@ namespace opus_gfx1201_pipeline {
 
 using opus::operator""_I;
 
-// Single-tile bf16 a16w16 GEMM kernel body (device function, launched by a
-// __global__ wrapper). One workgroup (32 threads, wave32) computes the full
-// 16x16 output.
+// Multi-tile bf16 a16w16 GEMM kernel body (device function). One workgroup
+// of N_WAVES waves computes BLOCK_M x BLOCK_N output. Each wave handles one
+// 16x16 sub-tile; waves tile both M and N (row-major over the tile grid).
+// BLOCK_M=16*TILE_M, BLOCK_N=16*TILE_N, TILE_M*TILE_N=N_WAVES.
 template <int BLOCK_M, int BLOCK_N>
 __device__ void gemm_a16w16_mono_tile_gfx1201_impl(
     const opus::bf16_t* __restrict__ A,   // [BLOCK_M, K]
@@ -37,9 +38,10 @@ __device__ void gemm_a16w16_mono_tile_gfx1201_impl(
     opus::bf16_t* __restrict__ C,         // [BLOCK_M, BLOCK_N]
     int K)
 {
-    static_assert(BLOCK_M == 16 && BLOCK_N == 16, "mono-tile: 16x16 only");
-
     constexpr int WM = 16, WN = 16, WK = 16;
+    constexpr int TILE_M = BLOCK_M / 16;
+    constexpr int TILE_N = BLOCK_N / 16;
+    static_assert(BLOCK_M % 16 == 0 && BLOCK_N % 16 == 0, "BLOCK must be 16*n");
     constexpr int ELEM_A = WM * WK / 32;  // 8
     constexpr int ELEM_B = WN * WK / 32;  // 8
     constexpr int ELEM_C = WM * WN / 32;  // 8
@@ -49,16 +51,18 @@ __device__ void gemm_a16w16_mono_tile_gfx1201_impl(
     using vtype_c = opus::vector_t<opus::fp32_t, ELEM_C>;  // fp32 accumulator
 
     int lane = static_cast<int>(__builtin_amdgcn_workitem_id_x() % 32);
+    int wave_id = static_cast<int>(__builtin_amdgcn_workitem_id_x() / 32);
+    int tile_m = wave_id / TILE_N;  // M tile index
+    int tile_n = wave_id % TILE_N;  // N tile index
+    int m_offset = tile_m * 16;
+    int n_offset = tile_n * 16;
     // gfx1201 native wmma_128b fragment encoding (from test_wmma_gfx1201.cu):
-    //   A: row-distributed. lane%16 = row; lane/16 = K-block (0..7 vs 8..15)
-    //   B: column-distributed. lane%16 = col; lane/16 = K-block
-    //   C: column-distributed. lane%16 = col; lane/16 = M-row-block (0..7 vs 8..15)
-    int a_row    = lane % 16;
+    int a_row    = m_offset + (lane % 16);
     int a_k_base = (lane / 16) * 8;
-    int b_col    = lane % 16;
+    int b_col    = n_offset + (lane % 16);
     int b_k_base = (lane / 16) * 8;
-    int c_col    = lane % 16;
-    int c_m_base = (lane / 16) * 8;
+    int c_col    = n_offset + (lane % 16);
+    int c_m_base = m_offset + (lane / 16) * 8;
 
     vtype_c acc{};
     opus::wmma<opus::bf16_t, opus::bf16_t, opus::fp32_t, WM, WN, WK> mma;
