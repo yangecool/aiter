@@ -23,6 +23,10 @@ if TRITON_GE_36:
             from aiter.ops.triton._gluon_kernels.gfx1250.attention.fp8_mqa_logits import (
                 _gluon_fp8_mqa_logits_kernel,
             )
+        elif arch == "gfx1201":
+            # gfx1201 (RDNA4): no gluon kernel yet, falls through to
+            # vanilla Triton path which works correctly with WMMA 16x16
+            pass
     except Exception:
         _gluon_fp8_mqa_logits_kernel = None
 

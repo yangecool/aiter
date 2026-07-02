@@ -451,5 +451,9 @@ def get_device_name():
         return "MI350"
     elif gfx == "gfx1250":
         return "MI400"
+    elif gfx == "gfx1201":
+        return "AMD_Radeon_R9700"
+    elif gfx == "gfx1200":
+        return "AMD_Radeon_RX9060"
     else:
         raise RuntimeError("Unsupported gfx")
