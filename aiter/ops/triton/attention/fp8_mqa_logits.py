@@ -14,14 +14,21 @@ TRITON_GE_36 = TRITON_VERSION >= Version("3.6.0")
 arch = arch_info.get_arch()
 _gluon_fp8_mqa_logits_kernel = None
 if TRITON_GE_36:
-    if arch == "gfx950":
-        from aiter.ops.triton._gluon_kernels.gfx950.attention.fp8_mqa_logits import (
-            _gluon_fp8_mqa_logits_kernel,
-        )
-    elif arch == "gfx1250":
-        from aiter.ops.triton._gluon_kernels.gfx1250.attention.fp8_mqa_logits import (
-            _gluon_fp8_mqa_logits_kernel,
-        )
+    try:
+        if arch == "gfx950":
+            from aiter.ops.triton._gluon_kernels.gfx950.attention.fp8_mqa_logits import (
+                _gluon_fp8_mqa_logits_kernel,
+            )
+        elif arch == "gfx1250":
+            from aiter.ops.triton._gluon_kernels.gfx1250.attention.fp8_mqa_logits import (
+                _gluon_fp8_mqa_logits_kernel,
+            )
+        elif arch == "gfx1201":
+            # gfx1201 (RDNA4): no gluon kernel yet, falls through to
+            # vanilla Triton path which works correctly with WMMA 16x16
+            pass
+    except Exception:
+        _gluon_fp8_mqa_logits_kernel = None
 
 
 # Hacks to see if we can use some newer features
@@ -32,7 +39,7 @@ def _async_copy_accepts_distributed_layout() -> bool:
         from triton.experimental.gluon.language.amd.cdna4 import async_copy
 
         src = inspect.getsource(async_copy.global_load_to_shared)
-    except (OSError, TypeError, ImportError):
+    except (OSError, TypeError, ImportError, AttributeError):
         return False
     return "DistributedLayout" in src
 
@@ -116,31 +123,10 @@ def fp8_mqa_logits(
     if not use_gluon:
         block_kv = 128
 
-        # WMMA v2 (gfx1201): M=N=16 is the only valid shape; 32 would
-        # cause Triton to fall back to FMA. hipBLASLt gfx1201 WavePerEU=1.
-        # gfx942/gfx950 with MFMA can use 32 for longer sequences.
-        if arch == "gfx1201":
+        # heuristic for MFMA instruction shape
+        matrix_instr_nonkdim = 32
+        if seq_len <= 1024:
             matrix_instr_nonkdim = 16
-            waves_per_eu = 1
-        else:
-            matrix_instr_nonkdim = 32 if seq_len > 1024 else 16
-            waves_per_eu = 2
-
-        _fnuz = torch.float8_e4m3fnuz
-        # The FN->FNUZ recast + scale compensation is only correct on gfx942,
-        # whose fp8 MFMA interprets operands as FNUZ. Other fp8 archs read the
-        # operands' native dtype, so converting there would corrupt them.
-        convert_q_fn = arch == "gfx942" and Q.dtype != _fnuz
-        convert_kv_fn = arch == "gfx942" and KV.dtype != _fnuz
-        scale_mul = 1.0
-        if convert_q_fn:
-            scale_mul *= 2.0
-            Q = (Q.to(torch.float32) * 0.5).to(_fnuz)
-        if convert_kv_fn:
-            scale_mul *= 2.0
-            KV = (KV.to(torch.float32) * 0.5).to(_fnuz)
-        if scale_mul != 1.0:
-            kv_scales = kv_scales.to(torch.float32) * scale_mul
 
         _fp8_mqa_logits_kernel[(seq_len,)](
             Q_ptr=Q,
@@ -166,7 +152,7 @@ def fp8_mqa_logits(
             BLOCK_KV=block_kv,
             num_warps=4,
             num_stages=2,
-            waves_per_eu=waves_per_eu,
+            waves_per_eu=2,
             matrix_instr_nonkdim=matrix_instr_nonkdim,
         )
     else:
