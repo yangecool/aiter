@@ -861,10 +861,17 @@ def build_module(
             if blob_gen_cmd:
                 blob_dir = f"{op_dir}/blob/"
                 os.makedirs(blob_dir, exist_ok=True)
+                cmd = f"{PY} {blob_gen_cmd.format(blob_dir)}"
                 if AITER_LOG_MORE:
-                    logger.info(f"exec_blob ---> {PY} {blob_gen_cmd.format(blob_dir)}")
-                os.system(f"{PY} {blob_gen_cmd.format(blob_dir)}")
-                sources += rename_cpp_to_cu([blob_dir], src_dir, hipify, recursive=True)
+                    logger.info(f"exec_blob ---> {cmd}")
+                ret = os.system(cmd)
+                if ret != 0:
+                    logger.warning(
+                        f"[{md_name}] CK blob generation failed (exit={ret}), "
+                        f"skipping CK path — HIP kernels will be used as fallback"
+                    )
+                else:
+                    sources += rename_cpp_to_cu([blob_dir], src_dir, hipify, recursive=True)
             return sources
 
         if isinstance(blob_gen_cmd, list):
