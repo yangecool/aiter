@@ -353,7 +353,7 @@ struct vec_cast<FP8_E4M3_TYPE, half>
 #ifdef FLASHINFER_HARDWARE_FP8_CONVERSION_ENABLED
         if constexpr(vec_size == 1)
         {
-            *(uint8_t*)&dst[0] = convert_f32_to_e4m3(__half2float(src[0]));
+            dst[0] = FP8_E4M3_TYPE(src[0]);
         }
         else
         {
@@ -371,7 +371,7 @@ struct vec_cast<FP8_E4M3_TYPE, half>
 #pragma unroll
         for(size_t i = 0; i < vec_size; ++i)
         {
-            *(uint8_t*)&dst[i] = convert_f32_to_e4m3(__half2float(src[i]));
+            dst[i] = FP8_E4M3_TYPE(src[i]);
         }
 #endif // FLASHINFER_HARDWARE_FP8_CONVERSION_ENABLED
     }
@@ -435,7 +435,7 @@ struct vec_cast<FP8_E5M2_TYPE, half>
 #ifdef FLASHINFER_HARDWARE_FP8_CONVERSION_ENABLED
         if constexpr(vec_size == 1)
         {
-            *(uint8_t*)&dst[0] = convert_f32_to_e5m2(__half2float(src[0]));
+            dst[0] = FP8_E5M2_TYPE(src[0]);
         }
         else
         {
@@ -452,7 +452,7 @@ struct vec_cast<FP8_E5M2_TYPE, half>
 #pragma unroll
         for(size_t i = 0; i < vec_size; ++i)
         {
-            *(uint8_t*)&dst[i] = convert_f32_to_e5m2(__half2float(src[i]));
+            dst[i] = FP8_E5M2_TYPE(src[i]);
         }
 #endif // FLASHINFER_HARDWARE_FP8_CONVERSION_ENABLED
     }
