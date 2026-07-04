@@ -29,7 +29,12 @@ try:
         reduce_segments_gluon as _reduce_segments_gluon,
     )
 except:  # noqa: E722
-    _reduce_segments_gluon = None
+    try:
+        from aiter.ops.triton._gluon_kernels.gfx1201.attention.unified_attention_reduce import (
+            reduce_segments_gluon as _reduce_segments_gluon,
+        )
+    except:  # noqa: E722
+        _reduce_segments_gluon = None
 
 import aiter.ops.triton.utils._triton.arch_info as arch_info
 from aiter.ops.triton.utils.types import e4m3_dtype
@@ -39,7 +44,7 @@ from aiter.ops.triton._triton_kernels.flash_attn_triton_amd.utils import get_arc
 _GLUON_REDUCE_MAX_SEGMENTS = 8
 
 DEVICE_ARCH = arch_info.get_arch()
-IS_DEVICE_ARCH_GFX12 = DEVICE_ARCH in ("gfx1250",)
+IS_DEVICE_ARCH_GFX12 = DEVICE_ARCH in ("gfx1250", "gfx1201")
 WARP_SIZE = 32 if IS_DEVICE_ARCH_GFX12 else 64
 WAPR_SIZE_LOG2 = int(math.log2(WARP_SIZE))
 
