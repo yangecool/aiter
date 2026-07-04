@@ -10,8 +10,14 @@ try:
         reduce_grouped_gluon_num_warps as _reduce_grouped_gluon_num_warps,
     )
 except (ImportError, ModuleNotFoundError):
-    _reduce_grouped_gluon = None
-    _reduce_grouped_gluon_num_warps = None
+    try:
+        from aiter.ops.triton._gluon_kernels.gfx1201.moe.reduce import (
+            reduce_grouped_gluon as _reduce_grouped_gluon,
+            reduce_grouped_gluon_num_warps as _reduce_grouped_gluon_num_warps,
+        )
+    except (ImportError, ModuleNotFoundError):
+        _reduce_grouped_gluon = None
+        _reduce_grouped_gluon_num_warps = None
 
 
 def reduce_grouped(
@@ -62,9 +68,10 @@ def reduce_grouped(
     out_dtype = x.dtype if out_dtype is None else out_dtype
     assert x.shape[-1] % reduction_n == 0
 
-    # Gluon path on gfx1250 for the plain grouped combine; swiglu-fused (MoE1 split-k) reductions, reduction_n != 1, and non-contiguous inputs stay on the Triton _reduce_grouped.
+    # Gluon path (gfx1250 TDM or gfx1201 manual); swiglu-fused reductions,
+    # reduction_n != 1, and non-contiguous inputs stay on Triton _reduce_grouped.
     use_gluon = (
-        is_tdm_avail()
+        _reduce_grouped_gluon is not None
         and indx is not None
         and not apply_swiglu
         and reduction_n == 1
