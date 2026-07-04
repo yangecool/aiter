@@ -124,10 +124,15 @@ def fp8_mqa_logits(
     if not use_gluon:
         block_kv = 128
 
-        # heuristic for MFMA instruction shape
-        matrix_instr_nonkdim = 32
-        if seq_len <= 1024:
+        # WMMA v2 (gfx1201): M=N=16 is the only valid shape; 32 would
+        # cause Triton to fall back to FMA. hipBLASLt gfx1201 WavePerEU=1.
+        # gfx942/gfx950 with MFMA can use 32 for longer sequences.
+        if arch == "gfx1201":
             matrix_instr_nonkdim = 16
+            waves_per_eu = 1
+        else:
+            matrix_instr_nonkdim = 32 if seq_len > 1024 else 16
+            waves_per_eu = 2
 
         _fp8_mqa_logits_kernel[(seq_len,)](
             Q_ptr=Q,
@@ -153,7 +158,7 @@ def fp8_mqa_logits(
             BLOCK_KV=block_kv,
             num_warps=4,
             num_stages=2,
-            waves_per_eu=2,
+            waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=matrix_instr_nonkdim,
         )
     else:
