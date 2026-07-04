@@ -10,6 +10,12 @@ from aiter.jit.utils.torch_guard import torch_compile_guard
 from aiter.ops.triton._gluon_kernels.gfx1250.norm.fused_rmsnorm_add import (
     _gluon_fused_rms_kernel,
 )
+try:
+    from aiter.ops.triton._gluon_kernels.gfx1201.norm.fused_rmsnorm_add import (
+        _gluon_fused_rms_kernel as _gluon_fused_rms_kernel_gfx1201,
+    )
+except (ImportError, ModuleNotFoundError):
+    _gluon_fused_rms_kernel_gfx1201 = None
 from aiter.ops.triton._triton_kernels.normalization.fused_rmsnorm_add import (
     _triton_fused_rms_kernel,
 )
@@ -57,11 +63,20 @@ def _fused_rmsnorm_add_core(x, weight, epsilon, res1):
         res1_stride_m = res1.stride(0)
         out_res1_stride_m = out_res1.stride(0)
 
-    if get_arch() == "gfx1250":
-
+    arch = get_arch()
+    use_gluon = (
+        (arch == "gfx1250")
+        or (arch == "gfx1201" and _gluon_fused_rms_kernel_gfx1201 is not None)
+    )
+    if use_gluon:
+        kernel = (
+            _gluon_fused_rms_kernel
+            if arch == "gfx1250"
+            else _gluon_fused_rms_kernel_gfx1201
+        )
         BLOCK_SIZE_M = 1
         grid = (triton.cdiv(M, BLOCK_SIZE_M),)
-        _gluon_fused_rms_kernel[grid](
+        kernel[grid](
             x,
             weight,
             res1,

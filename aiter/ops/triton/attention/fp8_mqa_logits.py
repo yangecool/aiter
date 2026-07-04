@@ -24,8 +24,9 @@ if TRITON_GE_36:
                 _gluon_fp8_mqa_logits_kernel,
             )
         elif arch == "gfx1201":
-            # gfx1201 (RDNA4): no gluon kernel yet, falls through to
-            # vanilla Triton path which works correctly with WMMA 16x16
+            # gfx1201 (RDNA4): use vanilla Triton path for now.
+            # Gluon kernel exists at _gluon_kernels/gfx1201/attention/fp8_mqa_logits.py
+            # but needs tuning; enable when ready.
             pass
     except Exception:
         _gluon_fp8_mqa_logits_kernel = None
@@ -166,6 +167,17 @@ def fp8_mqa_logits(
             num_warps = 1
             block_kv = 32
             other = {"USE_PADDED_SHARED_LAYOUT": ASYNC_COPY_SUPPORTS_DISTRIBUTED}
+        elif arch == "gfx1201":
+            # RDNA4: sync loads (no TDM), WMMA v2 K=16, wave32, 64KB LDS.
+            # Default to double-buffer (loop_variant=0); pipelined loop
+            # offers limited benefit without async hardware.
+            num_buffers = 2
+            loop_variant = 0
+            waves_per_eu = 1
+            num_chains = 8 if USE_FOLDED_REDUCTION else 0
+            num_warps = 4
+            block_kv = 128
+            other = {"LOOP_VARIANT": loop_variant}
         else:
             loop_variant = 1
             waves_per_eu = 1
