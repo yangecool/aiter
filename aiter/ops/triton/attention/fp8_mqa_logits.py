@@ -24,10 +24,9 @@ if TRITON_GE_36:
                 _gluon_fp8_mqa_logits_kernel,
             )
         elif arch == "gfx1201":
-            # gfx1201 (RDNA4): use vanilla Triton path for now.
-            # Gluon kernel exists at _gluon_kernels/gfx1201/attention/fp8_mqa_logits.py
-            # but needs tuning; enable when ready.
-            pass
+            from aiter.ops.triton._gluon_kernels.gfx1201.attention.fp8_mqa_logits import (
+                _gluon_fp8_mqa_logits_kernel,
+            )
     except Exception:
         _gluon_fp8_mqa_logits_kernel = None
 
