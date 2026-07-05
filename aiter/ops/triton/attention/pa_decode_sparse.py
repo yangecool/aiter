@@ -22,8 +22,12 @@ from aiter.ops.triton._triton_kernels.attention.pa_decode_sparse import (
 from aiter.ops.triton.utils._triton import arch_info
 from aiter.ops.triton.utils.logger import AiterTritonLogger
 from aiter.ops.triton._gluon_kernels.gfx1250.attention.pa_decode_sparse import (
-    _pa_decode_sparse as gluon_pa_decode_sparse,
-    _pa_decode_sparse_reduce as gluon_pa_decode_sparse_reduce,
+    _pa_decode_sparse as gluon_pa_decode_sparse_gfx1250,
+    _pa_decode_sparse_reduce as gluon_pa_decode_sparse_reduce_gfx1250,
+)
+from aiter.ops.triton._gluon_kernels.gfx1201.attention.pa_decode_sparse import (
+    _pa_decode_sparse as gluon_pa_decode_sparse_gfx1201,
+    _pa_decode_sparse_reduce as gluon_pa_decode_sparse_reduce_gfx1201,
 )
 
 DEVICE_ARCH = arch_info.get_arch()
@@ -141,11 +145,10 @@ def pa_decode_sparse(
     block_d = triton.next_power_of_2(D)
     assert block_d == D
 
-    use_gluon = DEVICE_ARCH == "gfx1250"
+    use_gluon = DEVICE_ARCH in ("gfx1250", "gfx1201")
 
-    # gfx1250 stages slots through LDS via TDM async_load, which hides the
-    # larger per-tile KV gather latency -> BLOCK_K=32 is fastest there. Other
-    # arches use the synchronous slot path, where 32 exposes memory latency.
+    # gfx1250 stages slots through LDS via TDM async_load; gfx1201 uses manual
+    # buffer_load gather without TDM. Both use the same software-pipelined loop.
     if use_gluon:
         block_k = 16
         attn_num_warps = 1
@@ -209,8 +212,12 @@ def pa_decode_sparse(
         num_groups_arg = 1
 
     if use_gluon:
-        impl = gluon_pa_decode_sparse
-        reduce_impl = gluon_pa_decode_sparse_reduce
+        if DEVICE_ARCH == "gfx1250":
+            impl = gluon_pa_decode_sparse_gfx1250
+            reduce_impl = gluon_pa_decode_sparse_reduce_gfx1250
+        else:
+            impl = gluon_pa_decode_sparse_gfx1201
+            reduce_impl = gluon_pa_decode_sparse_reduce_gfx1201
     else:
         impl = triton_pa_decode_sparse
         reduce_impl = triton_pa_decode_sparse_reduce
