@@ -153,9 +153,12 @@ def select_3d_config(
     waves_per_eu = 2
     num_segments = 0
     attn_stages = 2
-    if IS_DEVICE_ARCH_GFX12:
+    if DEVICE_ARCH == "gfx1250" or DEVICE_ARCH == "gfx1201":
         attn_warps = 1
-        TILE_SIZE = block_size
+        if DEVICE_ARCH == "gfx1250":
+            TILE_SIZE = block_size
+        else:  # gfx1201: Triton requires power-of-2 arange
+            TILE_SIZE = 2 ** int(math.log2(block_size))
         if shuffled_kv_cache and head_size < 128:
             if kv_cache_dtype == torch.bfloat16:
                 if block_size <= 64:
@@ -263,10 +266,7 @@ def use_2d_kernel(
     target_num_prgms,
     num_2d_prgms,
 ):
-    # gfx1201 Triton requires power-of-2 arange; 3D TILE_SIZE=block_size may violate
-    if IS_DEVICE_ARCH_GFX12:
-        if DEVICE_ARCH == "gfx1201":
-            return True
+    if DEVICE_ARCH == "gfx1250" or DEVICE_ARCH == "gfx1201":
         return (sliding_window > 0) or (not all_decode)
 
     return (
