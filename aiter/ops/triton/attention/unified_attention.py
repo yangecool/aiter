@@ -38,7 +38,7 @@ def is_2d_gluon_available(
     q_dtype, kv_cache_dtype, softcap, use_qq_bias, use_alibi_slopes
 ):
     use_gluon_2d = (
-        IS_DEVICE_ARCH_GFX12
+        DEVICE_ARCH == "gfx1250"
         and _unified_attention_gluon_kernel_2d is not None
         and not softcap
         and not use_qq_bias
