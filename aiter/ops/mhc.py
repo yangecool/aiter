@@ -264,8 +264,17 @@ def _mhc_fused_config_gfx1201_48(m, hidden_size, num_cu):
     if not valid:
         return 1, 16, 32, tile_k
 
-    tile_n = 32
-    tile_m = 16
+    # tile_n=16 wins at very small M (1-16); tile_n=32 wins for M >= 32
+    if m <= 16:
+        tile_n = 16
+    else:
+        tile_n = 32
+
+    # tile_m=32 wins at M=128; tile_m=16 otherwise
+    if m == 128:
+        tile_m = 32
+    else:
+        tile_m = 16
 
     if hidden_size >= 7168:
         table = [
