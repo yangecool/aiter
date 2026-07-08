@@ -68,21 +68,16 @@ def get_mhc_pre_splitk(m: int, hc_hidden_size: int) -> tuple[int, int]:
     tile_m = 16 * 4
     num_cu = get_cu_num()
     arch = get_gfx_runtime()
-    if arch.startswith("gfx9"):
-        tile_k_tg_dict = {
+    tile_k_tg_dict = (
+        {
             128: 2 * num_cu,
             64: 4 * num_cu,
         }
-    elif arch == "gfx1201":
-        # gfx1201 tuned: tile_k=32 beats tile_k=64 across all M for hc_hidden=28672
-        tile_k_tg_dict = {
-            64: 4 * num_cu,
-            32: 8 * num_cu,
-        }
-    else:
-        tile_k_tg_dict = {
+        if arch.startswith("gfx9")
+        else {
             64: 4 * num_cu,
         }
+    )
     selected_splitk = 1
     selected_tile_k = 64
     num_tg_m = (m + tile_m - 1) // tile_m
@@ -269,17 +264,8 @@ def _mhc_fused_config_gfx1201_48(m, hidden_size, num_cu):
     if not valid:
         return 1, 16, 32, tile_k
 
-    # tile_n=16 wins at very small M (1-16); tile_n=32 wins for M >= 32
-    if m <= 16:
-        tile_n = 16
-    else:
-        tile_n = 32
-
-    # tile_m=32 wins at M=128; tile_m=16 otherwise
-    if m == 128:
-        tile_m = 32
-    else:
-        tile_m = 16
+    tile_n = 32
+    tile_m = 16
 
     if hidden_size >= 7168:
         table = [
