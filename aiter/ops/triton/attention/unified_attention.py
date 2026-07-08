@@ -244,10 +244,8 @@ def use_2d_kernel(
     target_num_prgms,
     num_2d_prgms,
 ):
-    if DEVICE_ARCH == "gfx1250":
+    if IS_DEVICE_ARCH_GFX12:
         return (sliding_window > 0) or (not all_decode)
-    if DEVICE_ARCH == "gfx1201":
-        return True  # always 2D, gfx9 path TILE_SIZE always power-of-2
 
     return (
         (sliding_window > 0)
