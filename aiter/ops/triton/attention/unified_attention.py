@@ -244,8 +244,10 @@ def use_2d_kernel(
     target_num_prgms,
     num_2d_prgms,
 ):
-    # if IS_DEVICE_ARCH_GFX12, always use 3D if all_decode and 2D otherwise
+    # gfx1201 Triton requires power-of-2 arange; 3D TILE_SIZE=block_size may violate
     if IS_DEVICE_ARCH_GFX12:
+        if DEVICE_ARCH == "gfx1201":
+            return True
         return (sliding_window > 0) or (not all_decode)
 
     return (
