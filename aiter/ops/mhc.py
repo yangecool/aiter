@@ -68,16 +68,21 @@ def get_mhc_pre_splitk(m: int, hc_hidden_size: int) -> tuple[int, int]:
     tile_m = 16 * 4
     num_cu = get_cu_num()
     arch = get_gfx_runtime()
-    tile_k_tg_dict = (
-        {
+    if arch.startswith("gfx9"):
+        tile_k_tg_dict = {
             128: 2 * num_cu,
             64: 4 * num_cu,
         }
-        if arch.startswith("gfx9")
-        else {
+    elif arch == "gfx1201":
+        # gfx1201 tuned: tile_k=32 beats tile_k=64 across all M for hc_hidden=28672
+        tile_k_tg_dict = {
+            64: 4 * num_cu,
+            32: 8 * num_cu,
+        }
+    else:
+        tile_k_tg_dict = {
             64: 4 * num_cu,
         }
-    )
     selected_splitk = 1
     selected_tile_k = 64
     num_tg_m = (m + tile_m - 1) // tile_m
