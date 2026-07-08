@@ -20,6 +20,7 @@ def mhc_pre_gemm_sqrsum(
     x: Tensor,
     fn: Tensor,
     tile_k: int = 128,  # 64 or 128
+    is_fn_pack_bf16: int = 0,
 ) -> None: ...
 
 
@@ -179,30 +180,35 @@ def _mhc_fused_config_gfx1250_256(m, hidden_size, num_cu):
         return 1, 16, 32, tile_k
 
     tile_n = 32
-    tile_m = 16 if m <= 512 else 32
+    # Re-tuned on gfx1250/256 (TDM residual load): fn-reuse (tile_m=32) wins from
+    # m=512 up; m<=256 is launch-bound and stays on tile_m=16.
+    tile_m = 16 if m <= 256 else 32
 
     # (m upper bound, target split_k) measured per (m, hidden) then merged; the
     # target is snapped to a legal divisor below so it stays valid for any hidden.
+    # Mid/large m follows blocks_m*split_k ~= 4*cu (~128*cu/m); small m is
+    # launch-bound (high split_k, config barely matters); very large m goes deeper.
     if hidden_size >= 7168:
         table = [
-            (128, 56),
-            (256, 56),
+            (128, 32),
+            (256, 32),
             (512, 32),
-            (1024, 8),
+            (1024, 32),
             (2048, 16),
             (4096, 8),
-            (8192, 4),
-            (1 << 30, 2),
+            (8192, 14),
+            (1 << 30, 7),
         ]
     else:
         table = [
+            (128, 64),
             (256, 32),
-            (512, 64),
-            (1024, 16),
+            (512, 32),
+            (1024, 32),
             (2048, 16),
-            (4096, 16),
-            (8192, 4),
-            (1 << 30, 2),
+            (4096, 8),
+            (8192, 8),
+            (1 << 30, 8),
         ]
     target = next(t for ub, t in table if m <= ub)
     splitk = min(valid, key=lambda s: (abs(math.log(s) - math.log(target)), -s))
@@ -251,12 +257,50 @@ def _mhc_fused_config_default(m, hidden_size, num_cu):
     return selected_splitk, tile_m, tile_n, selected_tile_k
 
 
+def _mhc_fused_config_gfx1201_48(m, hidden_size, num_cu):
+    """Auto-tuned config for gfx1201 / Radeon R9700 (48 CU)."""
+    tile_k = 32 if hidden_size % 32 == 0 else 64
+    valid = _mhc_fused_valid_splitk(hidden_size, tile_k, num_cu)
+    if not valid:
+        return 1, 16, 32, tile_k
+
+    tile_n = 32
+    tile_m = 16
+
+    if hidden_size >= 7168:
+        table = [
+            (1, 32),
+            (2, 32),
+            (4, 32),
+            (8, 32),
+            (16, 32),
+            (32, 32),
+            (64, 32),
+            (128, 32),
+            (256, 32),
+            (512, 32),
+            (1024, 32),
+            (2048, 8),
+            (4096, 8),
+            (8192, 7),
+            (1 << 30, 1),
+        ]
+        target = next(t for ub, t in table if m <= ub)
+        splitk = min(valid, key=lambda s: (abs(math.log(s) - math.log(target)), -s))
+        return splitk, tile_m, tile_n, tile_k
+
+    # Smaller hidden_size: use generic fill heuristic
+    splitk = _mhc_fused_fill_splitk(m, valid, num_cu)
+    return splitk, tile_m, tile_n, tile_k
+
+
 # Per-chip tuned config registry, keyed by (gfx_arch, cu_num).
 # Each entry: (m, hidden_size, num_cu) -> (splitk, tile_m, tile_n, tile_k).
 _MHC_FUSED_POST_PRE_CONFIG = {
     ("gfx950", 256): _mhc_fused_config_gfx950_256,
     ("gfx942", 80): _mhc_fused_config_gfx942_80,
     ("gfx1250", 256): _mhc_fused_config_gfx1250_256,
+    ("gfx1201", 48): _mhc_fused_config_gfx1201_48,
 }
 
 
@@ -290,6 +334,7 @@ def mhc_pre_fake(
     sinkhorn_repeat: int = 20,  # if 0, only do pre for hc_head
     norm_weight: Optional[torch.Tensor] = None,
     norm_eps: float = 1e-6,
+    is_fn_pack_bf16: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     m = residual.size(0)
     hc_mult = residual.size(1)
@@ -315,6 +360,7 @@ def mhc_pre(
     norm_weight: Optional[torch.Tensor] = None,
     norm_eps: float = 1e-6,
     large_m_splitk: bool = False,
+    is_fn_pack_bf16: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     m = residual.size(0)
     hc_mult = residual.size(1)
@@ -334,7 +380,7 @@ def mhc_pre(
     )
     out = out_pad[:, :, :hc_mult3]
     sqrsum = torch.empty(selected_splitk, m, dtype=dtypes.fp32, device=device)
-    mhc_pre_gemm_sqrsum(out, sqrsum, residual, fn, selected_tile_k)
+    mhc_pre_gemm_sqrsum(out, sqrsum, residual, fn, selected_tile_k, is_fn_pack_bf16)
     # out = out.sum(0)
     # sqrsum = sqrsum.sum(0)
 
@@ -410,6 +456,7 @@ def mhc_fused_post_pre_gemm_sqrsum(
     tile_m: int = 16,  # 16, 32 or 64
     tile_n: int = 32,  # 16 or 32
     tile_k: int = 32,  # 32 or 64
+    is_fn_pack_bf16: int = 0,
 ) -> None: ...
 
 
@@ -429,6 +476,7 @@ def mhc_fused_post_pre_fake(
     norm_weight: Optional[torch.Tensor] = None,
     norm_eps: float = 1e-6,
     force_fused: bool = False,
+    is_fn_pack_bf16: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     m = layer_input.size(0)
     hc_mult = residual_in.size(1)
@@ -457,6 +505,7 @@ def mhc_fused_post_pre_large_m(
     sinkhorn_repeat: int = 20,
     norm_weight: Optional[torch.Tensor] = None,
     norm_eps: float = 1e-6,
+    is_fn_pack_bf16: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """gfx950 large-M post+pre (M > 1024): upstream ``mhc_post`` + ``mhc_pre``."""
     m = residual_in.size(0)
@@ -499,6 +548,7 @@ def mhc_fused_post_pre_large_m(
         norm_weight,
         norm_eps,
         large_m_splitk=True,
+        is_fn_pack_bf16=is_fn_pack_bf16,
     )
     return post_mix, comb_mix, layer_input_out, next_residual
 
@@ -520,6 +570,7 @@ def mhc_fused_post_pre(
     norm_weight: Optional[torch.Tensor] = None,
     norm_eps: float = 1e-6,
     force_fused: bool = False,
+    is_fn_pack_bf16: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused mhc_post + next mhc_pre (HIP), mirroring ``mhc_pre`` with post-step inputs.
 
@@ -542,7 +593,8 @@ def mhc_fused_post_pre(
     fused_m_upper_bound = {
         "gfx950": 1024,
         "gfx942": 128,
-        "gfx1250": 256,
+        "gfx1250": 1024,
+        "gfx1201": 1024,
     }.get(arch, 1024)
 
     if not force_fused and m >= fused_m_upper_bound:
@@ -566,6 +618,7 @@ def mhc_fused_post_pre(
             sinkhorn_repeat,
             norm_weight,
             norm_eps,
+            is_fn_pack_bf16=is_fn_pack_bf16,
         )
         return post_mix, comb_mix, layer_input_out, next_residual
 
@@ -585,6 +638,7 @@ def mhc_fused_post_pre(
             sinkhorn_repeat,
             norm_weight,
             norm_eps,
+            is_fn_pack_bf16=is_fn_pack_bf16,
         )
 
     assert layer_input.shape == (
@@ -638,6 +692,7 @@ def mhc_fused_post_pre(
         selected_tile_m,
         selected_tile_n,
         selected_tile_k,
+        is_fn_pack_bf16,
     )
 
     post_mix = torch.empty(m, hc_mult, 1, dtype=dtypes.fp32, device=device)
