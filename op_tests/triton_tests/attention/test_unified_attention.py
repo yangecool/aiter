@@ -423,6 +423,49 @@ def test_gfx1201_unified_attention_config() -> None:
     assert attn_config["TILE_SIZE"] == 64
     assert attn_config["NUM_SEGMENTS_PER_SEQ"] == 64
 
+    # gfx1201 3D: long contexts use higher num_warps
+    attn_cfg_short, _ = select_3d_config(
+        head_size=64, block_size=64, max_seqlen_k=4096,
+        target_num_prgms=192, num_2d_prgms=8,
+        q_dtype=torch.bfloat16, kv_cache_dtype=torch.bfloat16,
+    )
+    assert attn_cfg_short["num_warps"] == 2
+    assert attn_cfg_short["waves_per_eu"] == 2
+
+    attn_cfg_long, _ = select_3d_config(
+        head_size=64, block_size=64, max_seqlen_k=8192,
+        target_num_prgms=192, num_2d_prgms=8,
+        q_dtype=torch.bfloat16, kv_cache_dtype=torch.bfloat16,
+    )
+    assert attn_cfg_long["num_warps"] == 4
+    assert attn_cfg_long["waves_per_eu"] == 1
+
+    # gfx1201 2D prefill: dynamic TILE_SIZE
+    cfg_small = select_2d_config(
+        block_size=64, head_size=64, sliding_window=0, all_decode=False,
+        max_seqlen_q=64, max_seqlen_k=4096, num_queries_per_kv=8,
+        num_2d_prgms=1, q_dtype=torch.bfloat16, kv_cache_dtype=torch.bfloat16,
+        shuffled_kv_cache=False,
+    )
+    assert cfg_small["TILE_SIZE"] == 32
+
+    cfg_large = select_2d_config(
+        block_size=64, head_size=64, sliding_window=0, all_decode=False,
+        max_seqlen_q=256, max_seqlen_k=4096, num_queries_per_kv=8,
+        num_2d_prgms=1, q_dtype=torch.bfloat16, kv_cache_dtype=torch.bfloat16,
+        shuffled_kv_cache=False,
+    )
+    assert cfg_large["TILE_SIZE"] == 64
+
+    # gfx1201 2D waves_per_eu
+    cfg_decode = select_2d_config(
+        block_size=64, head_size=64, sliding_window=0, all_decode=True,
+        max_seqlen_q=1, max_seqlen_k=4096, num_queries_per_kv=8,
+        num_2d_prgms=1, q_dtype=torch.bfloat16, kv_cache_dtype=torch.bfloat16,
+        shuffled_kv_cache=False,
+    )
+    assert cfg_decode["waves_per_eu"] == 2
+
     with pytest.raises(AssertionError, match="power-of-two block_size"):
         select_2d_config(
             block_size=48,

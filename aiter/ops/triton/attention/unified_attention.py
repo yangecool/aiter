@@ -89,14 +89,22 @@ def select_2d_config(
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
 
-    TILE_SIZE = 32 if arch.name == "gfx1201" else 16 if arch.is_rdna else 64
+    TILE_SIZE = 16 if arch.is_rdna else 64
     waves_per_eu = 8 if arch.name == "gfx1151" else 6 if arch.is_rdna else 2
+
+    # gfx1201: lower occupancy than other RDNA — 2 beats 6 for unified attention.
+    if arch.name == "gfx1201":
+        waves_per_eu = 2
 
     max_num_stages_2d = 2 if head_size > 128 else 4
 
     # base prefill, for short cases
     if not all_decode:
         num_stages_2d, num_warps = 1, 2
+        # gfx1201: small tile for short prefill, large tile for long prefill.
+        # Tuning data: tile=32 wins at q_len=64, tile=64 wins at q_len≥256.
+        if arch.name == "gfx1201":
+            TILE_SIZE = 32 if max_seqlen_q < 256 else 64
     # pure decode config
     else:
         # to not have masking when loading KV
@@ -242,6 +250,12 @@ def select_3d_config(
         waves_per_eu = 1
         num_segments = max(1, num_segments // NUM_BLOCKS_GATHER_PER_TILE)
         TILE_SIZE = block_size * NUM_BLOCKS_GATHER_PER_TILE
+
+    # gfx1201: for long contexts use higher num_warps with lower occupancy.
+    # Tuning data shows (4,1) beats default (2,2) by ~20% when K > 4096.
+    if IS_DEVICE_ARCH_GFX1201 and max_seqlen_k > 4096:
+        attn_warps = 4
+        waves_per_eu = 1
 
     attn_config = {
         "TILE_SIZE": TILE_SIZE,
