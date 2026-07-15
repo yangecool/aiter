@@ -377,20 +377,50 @@ def test_gfx1201_unified_attention_config() -> None:
     assert not is_2d_gluon_available(
         torch.bfloat16, torch.bfloat16, 0, False, False
     )
-    assert not use_2d_kernel(64, 0, True, 1, 4352, 320, 1)
-    assert use_2d_kernel(64, 0, False, 2, 4352, 320, 1)
-    assert use_2d_kernel(64, 256, True, 1, 4352, 320, 1)
+    assert not use_2d_kernel(64, 0, True, 1, 4352, 192, 8)
+    assert use_2d_kernel(64, 0, True, 1, 512, 192, 8)
+    assert use_2d_kernel(64, 0, True, 1, 4352, 192, 193)
+    assert use_2d_kernel(64, 0, False, 2, 4352, 192, 8)
+    assert use_2d_kernel(64, 256, True, 1, 4352, 192, 8)
+
+    for num_tiles, expected_segments in (
+        (1, 1),
+        (3, 2),
+        (5, 4),
+        (63, 32),
+        (64, 64),
+        (65, 64),
+        (68, 64),
+        (128, 128),
+        (129, 128),
+    ):
+        attn_config, reduce_config = select_3d_config(
+            head_size=64,
+            block_size=2112,
+            max_seqlen_k=num_tiles * 64,
+            target_num_prgms=192,
+            num_2d_prgms=1,
+            q_dtype=torch.bfloat16,
+            kv_cache_dtype=torch.bfloat16,
+        )
+        num_segments = attn_config["NUM_SEGMENTS_PER_SEQ"]
+        assert attn_config["TILE_SIZE"] == 64
+        assert num_segments == expected_segments
+        assert num_segments <= num_tiles
+        assert num_segments & (num_segments - 1) == 0
+        assert reduce_config["NUM_SEGMENTS_PER_SEQ"] == num_segments
 
     attn_config, _ = select_3d_config(
         head_size=64,
         block_size=2176,
         max_seqlen_k=4352,
-        target_num_prgms=320,
-        num_2d_prgms=1,
+        target_num_prgms=192,
+        num_2d_prgms=8,
         q_dtype=torch.bfloat16,
         kv_cache_dtype=torch.bfloat16,
     )
     assert attn_config["TILE_SIZE"] == 64
+    assert attn_config["NUM_SEGMENTS_PER_SEQ"] == 64
 
     with pytest.raises(AssertionError, match="power-of-two block_size"):
         select_2d_config(
@@ -415,6 +445,7 @@ def test_gfx1201_unified_attention_config() -> None:
         (2, 48, 512, False),
         (2, 64, 512, True),
         (1, 48, 1328, False),
+        (1, 2112, 4352, False),
         (1, 2176, 4352, False),
         (1, 64, 1328, True),
     ],

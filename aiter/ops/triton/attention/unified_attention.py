@@ -49,6 +49,11 @@ def _is_power_of_two(value):
     return value > 0 and value & (value - 1) == 0
 
 
+def _floor_power_of_two(value):
+    assert value > 0
+    return 1 << (value.bit_length() - 1)
+
+
 def is_2d_gluon_available(
     q_dtype, kv_cache_dtype, softcap, use_qq_bias, use_alibi_slopes
 ):
@@ -201,18 +206,6 @@ def select_3d_config(
 
         TILE_SIZE = min(64, triton.next_power_of_2(block_size))
 
-        MAX_SEGMENTS = min(128, math.ceil(max_seqlen_k / TILE_SIZE))
-        MIN_SEGMENTS = min(8, MAX_SEGMENTS)
-        if num_segments == 0:
-            num_segments = math.ceil(target_num_prgms / num_2d_prgms)
-            num_segments = min(num_segments, MAX_SEGMENTS)
-            num_segments = triton.next_power_of_2(num_segments)
-            num_segments = min(num_segments, 128)
-            num_segments = max(num_segments, MIN_SEGMENTS)
-
-        if num_segments == MIN_SEGMENTS:
-            reduce_num_warps = 1
-
         if shuffled_kv_cache:
             assert _is_power_of_two(
                 block_size
@@ -224,6 +217,20 @@ def select_3d_config(
             TILE_SIZE = block_size
         elif q_dtype == e4m3_dtype and kv_cache_dtype == e4m3_dtype:
             TILE_SIZE = max(32, TILE_SIZE)
+
+        MAX_SEGMENTS = min(128, max(1, math.ceil(max_seqlen_k / TILE_SIZE)))
+        if IS_DEVICE_ARCH_GFX1201:
+            MAX_SEGMENTS = _floor_power_of_two(MAX_SEGMENTS)
+        MIN_SEGMENTS = min(8, MAX_SEGMENTS)
+        if num_segments == 0:
+            num_segments = math.ceil(target_num_prgms / num_2d_prgms)
+            num_segments = min(num_segments, MAX_SEGMENTS)
+            num_segments = triton.next_power_of_2(num_segments)
+            num_segments = min(num_segments, 128)
+            num_segments = max(num_segments, MIN_SEGMENTS)
+
+        if num_segments == MIN_SEGMENTS:
+            reduce_num_warps = 1
 
     if NUM_BLOCKS_GATHER_PER_TILE > 1:
         # force gather mode
@@ -265,7 +272,7 @@ def use_2d_kernel(
     num_2d_prgms,
 ):
     # GFX12 decode uses 3D; prefill and sliding-window attention use 2D.
-    if IS_DEVICE_ARCH_GFX12 or IS_DEVICE_ARCH_GFX1201:
+    if IS_DEVICE_ARCH_GFX12:
         return (sliding_window > 0) or (not all_decode)
 
     return (
