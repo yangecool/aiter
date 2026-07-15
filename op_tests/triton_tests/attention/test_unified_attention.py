@@ -7,8 +7,12 @@ import pytest
 import torch
 
 from aiter.ops.triton.attention.unified_attention import (
-    unified_attention,
+    WARP_SIZE,
     is_2d_gluon_available,
+    select_2d_config,
+    select_3d_config,
+    unified_attention,
+    use_2d_kernel,
 )
 from aiter.ops.shuffle import shuffle_weight
 from op_tests.triton_tests.quant.test_quant_mxfp4 import (
@@ -365,6 +369,138 @@ def ref_paged_attn(
         out = out / output_scale
 
     return out.to(out_dtype)
+
+
+@pytest.mark.skipif(DEVICE_ARCH != "gfx1201", reason="gfx1201 regression test")
+def test_gfx1201_unified_attention_config() -> None:
+    assert WARP_SIZE == 32
+    assert not is_2d_gluon_available(
+        torch.bfloat16, torch.bfloat16, 0, False, False
+    )
+    assert not use_2d_kernel(64, 0, True, 1, 4352, 320, 1)
+    assert use_2d_kernel(64, 0, False, 2, 4352, 320, 1)
+    assert use_2d_kernel(64, 256, True, 1, 4352, 320, 1)
+
+    attn_config, _ = select_3d_config(
+        head_size=64,
+        block_size=2176,
+        max_seqlen_k=4352,
+        target_num_prgms=320,
+        num_2d_prgms=1,
+        q_dtype=torch.bfloat16,
+        kv_cache_dtype=torch.bfloat16,
+    )
+    assert attn_config["TILE_SIZE"] == 64
+
+    with pytest.raises(AssertionError, match="power-of-two block_size"):
+        select_2d_config(
+            block_size=48,
+            head_size=64,
+            sliding_window=0,
+            all_decode=False,
+            max_seqlen_q=2,
+            max_seqlen_k=512,
+            num_queries_per_kv=8,
+            num_2d_prgms=1,
+            q_dtype=torch.bfloat16,
+            kv_cache_dtype=torch.bfloat16,
+            shuffled_kv_cache=True,
+        )
+
+
+@pytest.mark.skipif(DEVICE_ARCH != "gfx1201", reason="gfx1201 regression test")
+@pytest.mark.parametrize(
+    "query_len,block_size,kv_len,shuffled_kv_cache",
+    [
+        (2, 48, 512, False),
+        (2, 64, 512, True),
+        (1, 48, 1328, False),
+        (1, 2176, 4352, False),
+        (1, 64, 1328, True),
+    ],
+)
+@torch.inference_mode()
+def test_gfx1201_unified_attention(
+    query_len: int, block_size: int, kv_len: int, shuffled_kv_cache: bool
+) -> None:
+    seq_lens = [(query_len, kv_len)]
+    query_lens = [query_len]
+    num_blocks = (kv_len + block_size - 1) // block_size
+    (
+        query,
+        key_cache,
+        value_cache,
+        maybe_shuffled_key_cache,
+        maybe_shuffled_value_cache,
+        sinks,
+        output,
+        cu_query_lens,
+        kv_lens,
+        max_query_len,
+        max_kv_len,
+        scale,
+        window_size,
+        block_tables,
+        maybe_quant_query,
+        _query_scales,
+        q_descale,
+        k_descale,
+        v_descale,
+        _output_scale,
+    ) = generate_data(
+        seq_lens=seq_lens,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        head_size=64,
+        num_heads=(8, 1),
+        q_dtype=torch.bfloat16,
+        kv_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        shuffled_kv_cache=shuffled_kv_cache,
+        device="cuda",
+    )
+
+    unified_attention(
+        q=maybe_quant_query,
+        k=maybe_shuffled_key_cache,
+        v=maybe_shuffled_value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=0,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        sinks=sinks,
+        shuffled_kv_cache=shuffled_kv_cache,
+    )
+
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=[kv_len],
+        block_tables=block_tables,
+        scale=scale,
+        out_dtype=torch.bfloat16,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        sinks=sinks,
+    )
+    torch.testing.assert_close(
+        output.to(torch.float32),
+        ref_output.to(torch.float32),
+        atol=1.5e-2,
+        rtol=1e-2,
+    )
 
 
 @pytest.mark.parametrize(

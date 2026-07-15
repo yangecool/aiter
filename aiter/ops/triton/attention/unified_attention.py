@@ -40,8 +40,13 @@ _GLUON_REDUCE_MAX_SEGMENTS = 8
 
 DEVICE_ARCH = arch_info.get_arch()
 IS_DEVICE_ARCH_GFX12 = DEVICE_ARCH in ("gfx1250",)
-WARP_SIZE = 32 if IS_DEVICE_ARCH_GFX12 else 64
+IS_DEVICE_ARCH_GFX1201 = DEVICE_ARCH == "gfx1201"
+WARP_SIZE = 32 if (IS_DEVICE_ARCH_GFX12 or IS_DEVICE_ARCH_GFX1201) else 64
 WAPR_SIZE_LOG2 = int(math.log2(WARP_SIZE))
+
+
+def _is_power_of_two(value):
+    return value > 0 and value & (value - 1) == 0
 
 
 def is_2d_gluon_available(
@@ -106,6 +111,9 @@ def select_2d_config(
 
     # fix TILE_SIZE to block_size if shuffled_kv_cache is True
     if shuffled_kv_cache:
+        assert _is_power_of_two(
+            block_size
+        ), "Triton shuffled KV cache requires a power-of-two block_size"
         if q_dtype == e4m3_dtype and kv_cache_dtype == e4m3_dtype:
             assert (
                 block_size >= 32
@@ -206,6 +214,9 @@ def select_3d_config(
             reduce_num_warps = 1
 
         if shuffled_kv_cache:
+            assert _is_power_of_two(
+                block_size
+            ), "Triton shuffled KV cache requires a power-of-two block_size"
             if q_dtype == e4m3_dtype and kv_cache_dtype == e4m3_dtype:
                 assert (
                     block_size >= 32
@@ -224,11 +235,6 @@ def select_3d_config(
         waves_per_eu = 1
         num_segments = max(1, num_segments // NUM_BLOCKS_GATHER_PER_TILE)
         TILE_SIZE = block_size * NUM_BLOCKS_GATHER_PER_TILE
-    elif TILE_SIZE > block_size:
-        assert (
-            TILE_SIZE % block_size == 0
-        ), "TILE_SIZE needs to be divisible by block_size"
-        NUM_BLOCKS_GATHER_PER_TILE = TILE_SIZE // block_size
 
     attn_config = {
         "TILE_SIZE": TILE_SIZE,
@@ -258,8 +264,8 @@ def use_2d_kernel(
     target_num_prgms,
     num_2d_prgms,
 ):
-    # if IS_DEVICE_ARCH_GFX12, always use 3D if all_decode and 2D otherwise
-    if IS_DEVICE_ARCH_GFX12:
+    # GFX12 decode uses 3D; prefill and sliding-window attention use 2D.
+    if IS_DEVICE_ARCH_GFX12 or IS_DEVICE_ARCH_GFX1201:
         return (sliding_window > 0) or (not all_decode)
 
     return (
