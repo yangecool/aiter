@@ -379,7 +379,8 @@ def test_gfx1201_unified_attention_config() -> None:
     )
     assert not use_2d_kernel(64, 0, True, 1, 4352, 192, 8)
     assert use_2d_kernel(64, 0, True, 1, 512, 192, 8)
-    assert use_2d_kernel(64, 0, True, 1, 4352, 192, 193)
+    assert use_2d_kernel(64, 0, True, 1, 4352, 192, 49)
+    assert not use_2d_kernel(64, 0, True, 1, 4352, 192, 48)
     assert use_2d_kernel(64, 0, False, 2, 4352, 192, 8)
     assert use_2d_kernel(64, 256, True, 1, 4352, 192, 8)
 

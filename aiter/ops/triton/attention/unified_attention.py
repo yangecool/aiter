@@ -275,6 +275,17 @@ def use_2d_kernel(
     if IS_DEVICE_ARCH_GFX12:
         return (sliding_window > 0) or (not all_decode)
 
+    # gfx1201: switch to 2D when the grid already has ~one program per CU.
+    # Tuning data shows 48 CUs saturate around 48 programs; above that 2D
+    # avoids segment workspace / reduce overhead with no parallelism gain.
+    if IS_DEVICE_ARCH_GFX1201:
+        return (
+            (sliding_window > 0)
+            or (not all_decode)
+            or (max_seqlen_k <= 512)
+            or (num_2d_prgms > 48)
+        )
+
     return (
         (sliding_window > 0)
         or (max_seqlen_k <= 512)
