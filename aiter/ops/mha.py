@@ -2369,7 +2369,7 @@ def flash_attn_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
-    if not ENABLE_CK:
+    if not ENABLE_CK or get_gfx() == "gfx1201":
         from .triton.attention.mha import flash_attn_func as flash_attn_func_triton
 
         return flash_attn_func_triton(
@@ -3136,6 +3136,37 @@ def flash_attn_varlen_func(
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
 
+    def _run_triton_mha():
+        from .triton.attention.mha import (
+            flash_attn_varlen_func as flash_attn_varlen_func_triton,
+        )
+
+        return flash_attn_varlen_func_triton(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            bias=bias,
+            alibi_slopes=alibi_slopes,
+            deterministic=deterministic,
+            return_lse=return_lse,
+            return_attn_probs=return_attn_probs,
+            block_table=block_table,
+            out=out,
+            sink=sink_ptr,
+        )
+
+    # gfx1201 must bypass CK and FlyDSL while preserving CK for other ops.
+    if get_gfx() == "gfx1201":
+        return _run_triton_mha()
+
     # Try the PR3039 gfx1250 prefill ASM path before FlyDSL can claim it.
     def can_try_gfx1250_fmha_fwd_with_sink_varlen_asm():
         # Keep this public-router gate intentionally narrow so the PR3039
@@ -3224,31 +3255,7 @@ def flash_attn_varlen_func(
         return _flydsl_result
 
     if not ENABLE_CK:
-        from .triton.attention.mha import (
-            flash_attn_varlen_func as flash_attn_varlen_func_triton,
-        )
-
-        return flash_attn_varlen_func_triton(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            dropout_p=dropout_p,
-            softmax_scale=softmax_scale,
-            causal=causal,
-            window_size=window_size,
-            bias=bias,
-            alibi_slopes=alibi_slopes,
-            deterministic=deterministic,
-            return_lse=return_lse,
-            return_attn_probs=return_attn_probs,
-            block_table=block_table,
-            out=out,
-            sink=sink_ptr,
-        )
+        return _run_triton_mha()
     return FlashAttnVarlenFunc.apply(
         q,
         k,
