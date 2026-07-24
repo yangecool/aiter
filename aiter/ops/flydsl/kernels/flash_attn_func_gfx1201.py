@@ -100,6 +100,7 @@ def build_flash_attn_func_module_primary(
     fast_fp_math=True,
     daz=True,
     path_tag="auto",
+    lds_padding=4,
 ):
     """Build gfx1201 flash_attn_func (BN=32 + rocdl.exp2 + pipelined GEMM2 + overlapped V load)."""
     gpu_arch = get_hip_arch()
@@ -114,6 +115,7 @@ def build_flash_attn_func_module_primary(
 
     BLOCK_M = block_m if block_m is not None else 128
     BLOCK_N = block_n if block_n is not None else 32
+    LDS_PADDING = int(lds_padding)
 
     assert (
         BLOCK_N % K_SUB_N == 0
@@ -121,6 +123,8 @@ def build_flash_attn_func_module_primary(
     assert (
         BLOCK_M % ROWS_PER_WAVE == 0
     ), f"BLOCK_M ({BLOCK_M}) must be a multiple of {ROWS_PER_WAVE}"
+    if LDS_PADDING not in (4, 8, 16):
+        raise ValueError("lds_padding must be one of 4, 8, or 16")
 
     N_SUB_TILES = BLOCK_N // K_SUB_N
     NUM_S_ACCS = N_SUB_TILES * 2
@@ -131,7 +135,7 @@ def build_flash_attn_func_module_primary(
         flat_work_group_size = NUM_WAVES * WARP_SIZE
     BLOCK_SIZE = flat_work_group_size
 
-    PATH_TAG = f"M{BLOCK_M}N{BLOCK_N}_combined"
+    PATH_TAG = f"M{BLOCK_M}N{BLOCK_N}P{LDS_PADDING}_combined"
     BLOCK_N_OUT = BLOCK_N
 
     NUM_PREFETCH_K = 1
@@ -161,8 +165,8 @@ def build_flash_attn_func_module_primary(
     STRIDE_TOKEN = NUM_HEADS * HEAD_DIM
 
     # LDS layout -- K uses padding instead of XOR swizzle; V row-major with padding
-    K_STRIDE = HEAD_DIM + 4  # padding to reduce bank conflicts (no swizzle)
-    V_STRIDE = HEAD_DIM + 4  # padding to reduce bank conflicts
+    K_STRIDE = HEAD_DIM + LDS_PADDING  # padding to reduce bank conflicts (no swizzle)
+    V_STRIDE = HEAD_DIM + LDS_PADDING  # padding to reduce bank conflicts
 
     ENABLE_LDS_VEC16 = os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16", "1") == "1"
     VEC_WIDTH = 16 if ENABLE_LDS_VEC16 else 8
