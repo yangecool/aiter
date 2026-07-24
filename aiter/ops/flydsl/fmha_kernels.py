@@ -4,8 +4,8 @@
 """High-level FlyDSL Flash Attention APIs (gfx1201 / RDNA4).
 
 Wraps the FlyDSL `flash_attn_func_gfx1201` kernel with:
-  - Build cache keyed by (num_heads, head_dim, causal, dtype, waves_per_eu, daz).
-  - Automatic seq_len padding to the kernel's tile size (multiple of 128).
+  - Build cache including every selected compile-time tuning parameter.
+  - Automatic seq_len padding to the selected kernel tile size.
   - BSHD ([B, S, H, D]) input/output convention to match upstream
     flash-attention layout.
   - Non-causal padding-ratio safety guard: padded K/V tokens contribute to
@@ -22,11 +22,15 @@ The kernel implements self-attention only (Lq == Lk). Cross-attention
 
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 
 import torch
 import torch.nn.functional as F
 
+from aiter import logger
+
+from ..flydsl_fmha_config import select_flydsl_flash_attention_config
 from .kernels.flash_attn_func_gfx1201 import build_flash_attn_func_module
 from .kernels.fmha_gfx1250.fmha_kernel import flash_attn_varlen_d192_gfx1250
 
@@ -35,10 +39,6 @@ __all__ = [
     "flydsl_flash_attn_varlen_func",
 ]
 
-
-# Tile size baked into the gfx1201 kernel. Seq_len must be a multiple of this.
-# Picked to match BLOCK_M=128 in the kernel; padding is invisible to callers.
-_KERNEL_BLOCK_M = 128
 
 # Maximum tolerated ratio of padded tokens for non-causal attention.
 # Padded K/V keys produce QK^T = 0, but exp(0) = 1 leaks into the softmax
@@ -65,14 +65,26 @@ def _get_kernel(
     causal: bool,
     dtype_str: str,
     waves_per_eu: int,
+    block_m: int,
+    block_n: int,
+    global_load_vector_width: int,
     daz: bool,
 ):
+    logger.info(
+        "[FlyDSL] dispatching gfx1201 Flash Attention: "
+        f"dtype={dtype_str}, H={num_heads}, D={head_dim}, causal={causal}, "
+        f"BM={block_m}, BN={block_n}, WPE={waves_per_eu}, "
+        f"vec={global_load_vector_width}"
+    )
     return build_flash_attn_func_module(
         num_heads=num_heads,
         head_dim=head_dim,
         causal=causal,
         dtype_str=dtype_str,
         waves_per_eu=waves_per_eu,
+        block_m=block_m,
+        block_n=block_n,
+        global_load_vector_width=global_load_vector_width,
         daz=daz,
     )
 
@@ -82,7 +94,7 @@ def flydsl_flash_attn_func(
     k: torch.Tensor,
     v: torch.Tensor,
     causal: bool = False,
-    waves_per_eu: int = 2,
+    waves_per_eu: int | None = None,
     daz: bool = True,
     stream: torch.cuda.Stream | None = None,
 ) -> torch.Tensor:
@@ -93,7 +105,9 @@ def flydsl_flash_attn_func(
             (BSHD). All three must share dtype, batch, num_heads, head_dim,
             and seq_len. Must reside on a CUDA/HIP device.
         causal: apply causal masking when ``True``.
-        waves_per_eu: kernel occupancy hint passed to the FlyDSL builder.
+        waves_per_eu: optional kernel occupancy override. By default the
+            production config selector chooses this together with tile/vector
+            parameters.
         daz: enable denormals-are-zero on the kernel.
         stream: optional CUDA/HIP stream to launch on. Defaults to the current
             stream for ``q.device``.
@@ -140,6 +154,16 @@ def flydsl_flash_attn_func(
         )
 
     dtype_str = _torch_dtype_to_str(q.dtype)
+    config = select_flydsl_flash_attention_config(
+        arch=arch,
+        self_attention=True,
+        dtype_str=dtype_str,
+        head_dim=head_dim,
+        causal=causal,
+    )
+    selected_waves_per_eu = (
+        config.waves_per_eu if waves_per_eu is None else waves_per_eu
+    )
 
     # Pad seq_len up to the kernel's tile size. Tight padding (<= 0.5% of
     # S_pad) is empirically below the bf16 noise floor on production shapes
@@ -147,9 +171,10 @@ def flydsl_flash_attn_func(
     # padded K/V tokens produce QK^T = 0 but exp(0) = 1 still contributes
     # to the softmax denominator and would scale the output. Padded queries
     # produce garbage rows that we slice off before returning.
+    tile_multiple = math.lcm(config.block_m, config.block_n)
     seq_len_pad = (
-        (seq_len_real + _KERNEL_BLOCK_M - 1) // _KERNEL_BLOCK_M
-    ) * _KERNEL_BLOCK_M
+        (seq_len_real + tile_multiple - 1) // tile_multiple
+    ) * tile_multiple
     n_pad = seq_len_pad - seq_len_real
     if not causal and n_pad > 0 and n_pad / seq_len_pad > _MAX_NONCAUSAL_PAD_RATIO:
         raise ValueError(
@@ -157,7 +182,7 @@ def flydsl_flash_attn_func(
             f"{n_pad}/{seq_len_pad}={n_pad / seq_len_pad:.4f} exceeds 0.5% "
             "safety threshold; padded K/V tokens contribute to softmax "
             "denominator and would scale outputs. Either set causal=True, "
-            "pad seq_len to a multiple of 128 before calling, or use a "
+            "pad seq_len to the selected tile multiple before calling, or use a "
             "self-attn kernel with explicit attention masking."
         )
     if seq_len_pad != seq_len_real:
@@ -190,7 +215,10 @@ def flydsl_flash_attn_func(
             head_dim=head_dim,
             causal=causal,
             dtype_str=dtype_str,
-            waves_per_eu=waves_per_eu,
+            waves_per_eu=selected_waves_per_eu,
+            block_m=config.block_m,
+            block_n=config.block_n,
+            global_load_vector_width=config.global_load_vector_width,
             daz=daz,
         )
         exe(

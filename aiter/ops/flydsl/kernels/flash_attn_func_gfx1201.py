@@ -31,7 +31,6 @@ Requires: head_dim % 32 == 0, head_dim >= 64.
 """
 
 import math as host_math
-import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -101,8 +100,9 @@ def build_flash_attn_func_module_primary(
     daz=True,
     path_tag="auto",
     lds_padding=4,
+    global_load_vector_width=16,
 ):
-    """Build gfx1201 flash_attn_func (BN=32 + rocdl.exp2 + pipelined GEMM2 + overlapped V load)."""
+    """Build the gfx1201 flash_attn_func kernel."""
     gpu_arch = get_hip_arch()
 
     # ---- WMMA / wave32 constants ----
@@ -116,6 +116,7 @@ def build_flash_attn_func_module_primary(
     BLOCK_M = block_m if block_m is not None else 128
     BLOCK_N = block_n if block_n is not None else 32
     LDS_PADDING = int(lds_padding)
+    VEC_WIDTH = int(global_load_vector_width)
 
     assert (
         BLOCK_N % K_SUB_N == 0
@@ -125,6 +126,8 @@ def build_flash_attn_func_module_primary(
     ), f"BLOCK_M ({BLOCK_M}) must be a multiple of {ROWS_PER_WAVE}"
     if LDS_PADDING not in (4, 8, 16):
         raise ValueError("lds_padding must be one of 4, 8, or 16")
+    if VEC_WIDTH not in (8, 16):
+        raise ValueError("global_load_vector_width must be 8 or 16")
 
     N_SUB_TILES = BLOCK_N // K_SUB_N
     NUM_S_ACCS = N_SUB_TILES * 2
@@ -135,7 +138,7 @@ def build_flash_attn_func_module_primary(
         flat_work_group_size = NUM_WAVES * WARP_SIZE
     BLOCK_SIZE = flat_work_group_size
 
-    PATH_TAG = f"M{BLOCK_M}N{BLOCK_N}P{LDS_PADDING}_combined"
+    PATH_TAG = f"M{BLOCK_M}N{BLOCK_N}P{LDS_PADDING}V{VEC_WIDTH}_combined"
     BLOCK_N_OUT = BLOCK_N
 
     NUM_PREFETCH_K = 1
@@ -168,8 +171,6 @@ def build_flash_attn_func_module_primary(
     K_STRIDE = HEAD_DIM + LDS_PADDING  # padding to reduce bank conflicts (no swizzle)
     V_STRIDE = HEAD_DIM + LDS_PADDING  # padding to reduce bank conflicts
 
-    ENABLE_LDS_VEC16 = os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16", "1") == "1"
-    VEC_WIDTH = 16 if ENABLE_LDS_VEC16 else 8
     THREADS_PER_ROW_LOAD = HEAD_DIM // VEC_WIDTH
     ROWS_PER_BATCH_LOAD = BLOCK_SIZE // THREADS_PER_ROW_LOAD
 
@@ -628,7 +629,7 @@ def build_flash_attn_func_module_primary(
                     v_elems.append(_memref.load(lds_kv, [_raw(v_lds_idx)]))
                 return Vec.from_elements(v_elems, elem_dtype).ir_value()
 
-            # Software pipeline: preload first V pack
+            # Software pipeline: preload first V pack.
             cur_v_packs = []
             for st_idx in range_constexpr(N_SUB_TILES):
                 cur_v_packs.append(_load_v_rowmajor(st_idx * K_SUB_N, 0, 0))
@@ -642,17 +643,21 @@ def build_flash_attn_func_module_primary(
                         next_pks = pks + 1
                     has_next = const_expr(next_pks < PV_K_STEPS)
 
-                    # Prefetch next V while current WMMA runs
+                    # Prefetch next V while current WMMA runs.
                     next_v_packs = []
                     if const_expr(has_next):
                         for st_idx in range_constexpr(N_SUB_TILES):
                             next_v_packs.append(
-                                _load_v_rowmajor(st_idx * K_SUB_N, next_pks, next_dc)
+                                _load_v_rowmajor(
+                                    st_idx * K_SUB_N, next_pks, next_dc
+                                )
                             )
 
                     for st_idx in range_constexpr(N_SUB_TILES):
                         o_accs[dc] = wmma_acc(
-                            cur_v_packs[st_idx], p_packs_all[st_idx][pks], o_accs[dc]
+                            cur_v_packs[st_idx],
+                            p_packs_all[st_idx][pks],
+                            o_accs[dc],
                         )
 
                     if const_expr(has_next):

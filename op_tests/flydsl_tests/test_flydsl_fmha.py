@@ -96,6 +96,43 @@ def test_flydsl_fmha_correctness_bf16(batch, seq_len, num_heads, head_dim):
     assert cos.mean().item() > 0.999, f"mean_cos={cos.mean().item():.6f}"
 
 
+@pytest.mark.parametrize("num_heads", [2, 3, 5, 10, 12, 24, 40])
+def test_flydsl_fmha_production_config_correctness(num_heads):
+    q, k, v = _make_qkv(1, 1024, num_heads, 128, torch.bfloat16)
+    out = flydsl_flash_attn_func(q, k, v, causal=False)
+    ref = _ref_sdpa_bshd(q, k, v)
+    cos = F.cosine_similarity(
+        out.float().reshape(-1, 128),
+        ref.float().reshape(-1, 128),
+        dim=1,
+    )
+    assert cos.min().item() > 0.99, f"min_cos={cos.min().item():.6f}"
+
+
+def test_public_mha_routes_eligible_call_to_flydsl(monkeypatch):
+    import aiter.ops.flydsl.fmha_kernels as fmha_kernels
+    from aiter.ops.mha import flash_attn_func as public_flash_attn_func
+
+    original = fmha_kernels.flydsl_flash_attn_func
+    calls = []
+
+    def wrapped(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fmha_kernels, "flydsl_flash_attn_func", wrapped)
+    q, k, v = _make_qkv(1, 1024, 3, 128, torch.bfloat16)
+    out = public_flash_attn_func(
+        q,
+        k,
+        v,
+        causal=False,
+        softmax_scale=128**-0.5,
+    )
+    assert out.shape == q.shape
+    assert len(calls) == 1
+
+
 def test_flydsl_fmha_rejects_cross_attention():
     q = torch.randn(1, 1024, 12, 128, dtype=torch.bfloat16, device="cuda")
     k = torch.randn(1, 512, 12, 128, dtype=torch.bfloat16, device="cuda")

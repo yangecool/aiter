@@ -2369,7 +2369,56 @@ def flash_attn_func(
             The output of softmax (possibly with different scaling). It also encodes the dropout
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
-    if not ENABLE_CK or get_gfx() == "gfx1201":
+    gfx = get_gfx()
+    if gfx == "gfx1201":
+        from .flydsl_fmha_config import (
+            can_use_gfx1201_flydsl_dense_attention,
+        )
+
+        # Production-only FlyDSL inference path. Every unsupported semantic
+        # falls through to the existing gfx1201 Triton implementation.
+        can_use_flydsl = can_use_gfx1201_flydsl_dense_attention(
+            arch=gfx,
+            q_shape=tuple(q.shape),
+            k_shape=tuple(k.shape),
+            v_shape=tuple(v.shape),
+            q_dtype="bf16" if q.dtype == dtypes.bf16 else str(q.dtype),
+            k_dtype="bf16" if k.dtype == dtypes.bf16 else str(k.dtype),
+            v_dtype="bf16" if v.dtype == dtypes.bf16 else str(v.dtype),
+            same_cuda_device=(
+                q.is_cuda
+                and k.is_cuda
+                and v.is_cuda
+                and q.device == k.device
+                and q.device == v.device
+            ),
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=tuple(window_size),
+            has_bias=bias is not None,
+            has_alibi=alibi_slopes is not None,
+            return_lse=return_lse,
+            return_attn_probs=return_attn_probs,
+            has_cu_seqlens=(
+                cu_seqlens_q is not None or cu_seqlens_kv is not None
+            ),
+            has_sink=sink_ptr is not None,
+            num_splits=num_splits,
+            requires_grad=(
+                torch.is_grad_enabled()
+                and (q.requires_grad or k.requires_grad or v.requires_grad)
+            ),
+        )
+        if can_use_flydsl:
+            from .flydsl.utils import is_flydsl_available
+
+            if is_flydsl_available():
+                from .flydsl.fmha_kernels import flydsl_flash_attn_func
+
+                return flydsl_flash_attn_func(q, k, v, causal=False)
+
+    if not ENABLE_CK or gfx == "gfx1201":
         from .triton.attention.mha import flash_attn_func as flash_attn_func_triton
 
         return flash_attn_func_triton(
