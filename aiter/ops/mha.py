@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
+import os
 from typing import Any, Optional, Tuple
 
 import torch
@@ -14,6 +15,9 @@ from ..jit.utils.mha_recipes import (
     get_mha_varlen_prebuild_variants_by_names,
 )
 from ..utility import dtypes
+
+
+_GFX1201_FLYDSL_MHA_ENV = "AITER_ENABLE_GFX1201_FLYDSL_MHA"
 
 
 def cmdGenFunc_mha_fwd(
@@ -2370,13 +2374,16 @@ def flash_attn_func(
             pattern (negative means that location was dropped, nonnegative means it was kept).
     """
     gfx = get_gfx()
-    if gfx == "gfx1201":
+    if (
+        gfx == "gfx1201"
+        and os.environ.get(_GFX1201_FLYDSL_MHA_ENV, "0") == "1"
+    ):
         from .flydsl_fmha_config import (
             can_use_gfx1201_flydsl_dense_attention,
         )
 
-        # Production-only FlyDSL inference path. Every unsupported semantic
-        # falls through to the existing gfx1201 Triton implementation.
+        # FlyDSL stays opt-in until the BF16 path is validated independently.
+        # Every unsupported semantic falls through to gfx1201 Triton MHA.
         can_use_flydsl = can_use_gfx1201_flydsl_dense_attention(
             arch=gfx,
             q_shape=tuple(q.shape),

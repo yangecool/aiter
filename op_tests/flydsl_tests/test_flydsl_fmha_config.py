@@ -158,6 +158,17 @@ class FlyDSLFMHAConfigTests(unittest.TestCase):
         )
         self.assertIn("flydsl_flash_attn_func", called_names)
 
+    def test_public_mha_keeps_gfx1201_flydsl_opt_in(self):
+        source = (REPO_ROOT / "aiter/ops/mha.py").read_text(encoding="utf-8")
+        self.assertIn(
+            '_GFX1201_FLYDSL_MHA_ENV = "AITER_ENABLE_GFX1201_FLYDSL_MHA"',
+            source,
+        )
+        self.assertIn(
+            'os.environ.get(_GFX1201_FLYDSL_MHA_ENV, "0") == "1"',
+            source,
+        )
+
     def test_kernel_cache_signature_covers_compile_time_config(self):
         source = (REPO_ROOT / "aiter/ops/flydsl/fmha_kernels.py").read_text(
             encoding="utf-8"
