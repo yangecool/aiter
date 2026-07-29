@@ -47,6 +47,16 @@ def _hip_blockscale_supported() -> bool:
         return False
 
 
+def _ck_a8w8_supported() -> bool:
+    """Return whether the bundled CK A8W8 code objects cover the device."""
+    try:
+        return get_gfx().startswith("gfx9")
+    except Exception:
+        # Preserve the historical behavior when the runtime architecture is
+        # unavailable (for example during fake/meta execution).
+        return True
+
+
 def gen_gemm_a8w8_ck_fake_tensors(
     XQ: torch.Tensor,
     WQ: torch.Tensor,
@@ -534,6 +544,14 @@ def gemm_a8w8(
     #     dtypes.bf16,
     #     dtypes.fp16,
     # ], f"Output {dtype=} is currently not supported in gemm_a8w8"
+    if not _ck_a8w8_supported():
+        # The public entry remains architecture-safe without embedding any
+        # model-specific layout or tuning policy. Consumers that need a
+        # different quantization contract can select their own Aiter Triton
+        # kernel at the integration boundary.
+        from ..ops.triton.gemm.basic.gemm_a8w8 import gemm_a8w8 as gemm_a8w8_triton
+
+        return gemm_a8w8_triton(XQ, WQ, x_scale, w_scale, bias, dtype=dtype)
     return gemm_a8w8_CK(XQ, WQ, x_scale, w_scale, bias, dtype, splitK)
 
 
