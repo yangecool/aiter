@@ -1,4 +1,7 @@
 gfx,cu_num,M,N,K,q_dtype_w,kernelId,splitK,us,kernelName,tflops,bw,errRatio
+gfx1201,24,512,4096,4096,torch.float8_e4m3fn,63,0,257.8786,a8w8_rowwise_128x16x128x128_16x16_1x4_8x16x1_8x16x1_1x16x1x8_4x4x1_1x1_interwave_v2,66.62,89.46,0.0
+gfx1201,24,512,10240,4096,torch.float8_e4m3fn,82,0,608.7952,a8w8_rowwise_128x16x128x128_16x16_1x4_8x16x1_8x16x1_1x16x1x8_4x4x1_1x1_interwave_v2,70.55,89.56,0.0
+gfx1201,24,512,4096,10240,torch.float8_e4m3fn,63,0,602.8352,a8w8_rowwise_128x16x128x128_16x16_1x4_8x16x1_8x16x1_1x16x1x8_4x4x1_1x1_interwave_v2,71.25,85.23,0.0
 gfx942,80,1,1280,8192,torch.int8,34,0,20.5611,a8w8_rowwise_256x16x64x512_16x16_1x1_32x8x1_32x8x1_1x16x1x16_4x4x1_1x1_intrawave_v3,1.02,510.5,0.0
 gfx942,80,1,8192,1024,torch.int8,78,0,9.1327,a8w8_rowwise_64x16x16x128_16x16_1x1_8x8x1_8x8x1_1x16x1x4_4x4x1_1x1_interwave_v2,1.84,920.43,0.0
 gfx942,80,32,1280,8192,torch.int8,34,0,19.9841,a8w8_rowwise_256x16x64x512_16x16_1x1_32x8x1_32x8x1_1x16x1x16_4x4x1_1x1_intrawave_v3,33.58,541.92,0.0

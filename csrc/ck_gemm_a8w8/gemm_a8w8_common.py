@@ -166,6 +166,8 @@ default_kernels_dict = {
     (-8):                  kernelInstance(       256,       256,       128,        64,           32,         32,          4,          2,      [4, 64, 1],      [4, 64, 1],   [1, 32, 1, 8],  [8, 8, 1],           1,           1, "Interwave",  1),
     (-9):                  kernelInstance(       256,       224,       256,       128,           16,         16,          7,          8,      [8, 32, 1],      [8, 32, 1],   [1, 32, 1, 8],  [8, 8, 1],           1,           2, "Intrawave",  3),
     (-10):                 kernelInstance(       128,        16,        32,       128,           16,         16,          1,          1,      [8, 16, 1],      [8, 16, 1],   [1, 16, 1, 8],  [4, 4, 1],           1,           1, "Intrawave",  2),
+    # gfx1201 fallback: 16x16 WMMA kernel verified by LightX2V rowwise tuning.
+    (-11):                 kernelInstance(       128,        16,       128,       128,           16,         16,          1,          4,      [8, 16, 1],      [8, 16, 1],   [1, 16, 1, 8],  [4, 4, 1],           1,           1, "Interwave",  2),
 
 }
 # fmt: on

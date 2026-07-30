@@ -80,6 +80,14 @@ RowwiseKernel rowwise_heuristic_dispatch(int M, int N, int K)
   }
 }
 
+template <typename ABDataType, typename DDataType, typename EDataType>
+RowwiseKernel rowwise_gfx1201_heuristic_dispatch()
+{
+  // gfx1201 uses 16x16 WMMA. This instance is the tuned winner for the
+  // LightX2V UMT5 shapes and supports padding for nearby rowwise shapes.
+  return a8w8_rowwise_128x16x128x128_16x16_1x4_8x16x1_8x16x1_1x16x1x8_4x4x1_1x1_interwave_v2<ABDataType, DDataType, EDataType>;
+}
+
 // Helper function to return the next largest power of 2
 static constexpr int nextPow2(unsigned int num)
 {
@@ -130,6 +138,10 @@ RowwiseKernel rowwise_dispatch(int M, int N, int K)
   if (it != lookup.end())
   {
     return it->second;
+  }
+  if (gfx == "gfx1201")
+  {
+    return rowwise_gfx1201_heuristic_dispatch<ABDataType, DDataType, EDataType>();
   }
   // Otherwise, use heuristics.
   return rowwise_heuristic_dispatch<ABDataType, DDataType, EDataType>(M, N, K);

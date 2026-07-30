@@ -50,11 +50,30 @@ def _hip_blockscale_supported() -> bool:
 def _ck_a8w8_supported() -> bool:
     """Return whether the bundled CK A8W8 code objects cover the device."""
     try:
-        return get_gfx().startswith("gfx9")
+        gfx = get_gfx()
+        return gfx.startswith("gfx9") or gfx == "gfx1201"
     except Exception:
         # Preserve the historical behavior when the runtime architecture is
         # unavailable (for example during fake/meta execution).
         return True
+
+
+def _gemm_a8w8_triton(
+    XQ: Tensor,
+    WQ: Tensor,
+    x_scale: Tensor,
+    w_scale: Tensor,
+    bias: Optional[Tensor],
+    dtype: torch.dtype,
+) -> Tensor:
+    from ..ops.triton.gemm.basic.gemm_a8w8 import gemm_a8w8 as gemm_a8w8_triton
+
+    return gemm_a8w8_triton(XQ, WQ, x_scale, w_scale, bias, dtype=dtype)
+
+
+def _is_ck_unsupported_shape(error: RuntimeError) -> bool:
+    """True only for CK's pre-launch IsSupportedArgument rejection."""
+    return "This GEMM is not supported!" in str(error)
 
 
 def gen_gemm_a8w8_ck_fake_tensors(
@@ -545,14 +564,23 @@ def gemm_a8w8(
     #     dtypes.fp16,
     # ], f"Output {dtype=} is currently not supported in gemm_a8w8"
     if not _ck_a8w8_supported():
-        # The public entry remains architecture-safe without embedding any
-        # model-specific layout or tuning policy. Consumers that need a
-        # different quantization contract can select their own Aiter Triton
-        # kernel at the integration boundary.
-        from ..ops.triton.gemm.basic.gemm_a8w8 import gemm_a8w8 as gemm_a8w8_triton
-
-        return gemm_a8w8_triton(XQ, WQ, x_scale, w_scale, bias, dtype=dtype)
-    return gemm_a8w8_CK(XQ, WQ, x_scale, w_scale, bias, dtype, splitK)
+        return _gemm_a8w8_triton(XQ, WQ, x_scale, w_scale, bias, dtype)
+    try:
+        return gemm_a8w8_CK(XQ, WQ, x_scale, w_scale, bias, dtype, splitK)
+    except RuntimeError as error:
+        # gfx1201 has a CK rowwise path and must use it for tuned or compatible
+        # shapes. Fall back only when CK rejects the argument before launch;
+        # compilation, launch, and correctness failures must remain visible.
+        if get_gfx() == "gfx1201" and _is_ck_unsupported_shape(error):
+            logger.warning(
+                "CK rowwise A8W8 does not support shape M:%s, N:%s, K:%s; "
+                "using rowwise Triton",
+                XQ.shape[0],
+                WQ.shape[0],
+                XQ.shape[-1],
+            )
+            return _gemm_a8w8_triton(XQ, WQ, x_scale, w_scale, bias, dtype)
+        raise
 
 
 def gemm_a8w8_ASM(

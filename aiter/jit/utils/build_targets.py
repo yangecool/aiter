@@ -41,7 +41,9 @@ GFX_CU_NUM_MAP = {
     "gfx950": 256,  # MI350
     "gfx1250": 256,  # MI400 placeholder; set CU_NUM explicitly for the target SKU
     "gfx1200": 28,  # RX 9060 XT LP (Navi 44); set CU_NUM explicitly for the target SKU
-    "gfx1201": 48,  # Radeon AI PRO R9600D / RX 9070 GRE (Navi 48); set CU_NUM explicitly for the target SKU
+    # PyTorch/HIP exposes gfx1201 execution resources as 24 WGPs. AITER's
+    # LightX2V rowwise tuning and runtime dispatch use that value end to end.
+    "gfx1201": 24,
 }
 
 

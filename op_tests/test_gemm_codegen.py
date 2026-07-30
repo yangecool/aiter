@@ -60,6 +60,7 @@ REPRO_BPRESHUFFLE_CSV = os.path.join(
 TARGET_A = ("gfx942", 304)  # MI300X
 TARGET_B = ("gfx950", 256)  # MI350
 TARGET_C = ("gfx942", 80)  # MI308X — gfx942 with CU_NUM override
+TARGET_D = ("gfx1201", 24)  # LightX2V/AITER use HIP's 24-WGP runtime key
 
 # ---------------------------------------------------------------------------
 # Minimal test harness (no external test framework required)
@@ -153,7 +154,16 @@ def test_get_build_targets():
             "gfx942" in GFX_CU_NUM_MAP and "gfx950" in GFX_CU_NUM_MAP,
         )
 
-        # 1.8 Live GPU fallback — requires torch and a GPU; skipped otherwise
+        # 1.8 gfx1201 build/config lookup uses the same 24 key as HIP runtime.
+        os.environ["GPU_ARCHS"] = TARGET_D[0]
+        t = get_build_targets_env()
+        _check(
+            f"GPU_ARCHS={TARGET_D[0]} uses the {TARGET_D[1]}-WGP runtime key",
+            t == [TARGET_D],
+            str(t),
+        )
+
+        # 1.9 Live GPU fallback — requires torch and a GPU; skipped otherwise
         del os.environ["GPU_ARCHS"]
         try:
             from aiter.jit.utils.chip_info import get_build_targets
@@ -178,6 +188,61 @@ def test_get_build_targets():
             os.environ["CU_NUM"] = orig_cu
         elif "CU_NUM" in os.environ:
             del os.environ["CU_NUM"]
+
+
+def test_gfx1201_rowwise_ck_policy():
+    _section("2. gfx1201 rowwise CK — 24-CU tuned lookup and WMMA fallback")
+
+    header_path = os.path.join(_REPO_ROOT, "csrc", "include", "gemm_dispatch_utils.h")
+    with open(header_path, encoding="utf-8") as handle:
+        dispatch_utils = handle.read()
+
+    _check(
+        "C++ dispatch keeps HIP multiProcessorCount as the lookup key",
+        "return prop.multiProcessorCount;" in dispatch_utils,
+    )
+    _check(
+        "C++ dispatch does not convert gfx1201 key 24 to 48",
+        "normalize_gemm_cu_num" not in dispatch_utils,
+    )
+
+    csv_path = os.path.join(
+        _REPO_ROOT, "aiter", "configs", "a8w8_tuned_gemm.csv"
+    )
+    tuned = pd.read_csv(csv_path)
+    rows = tuned[(tuned["gfx"] == "gfx1201") & (tuned["cu_num"] == 24)]
+    actual_shapes = set(rows[["M", "N", "K"]].itertuples(index=False, name=None))
+    expected_shapes = {
+        (512, 4096, 4096),
+        (512, 10240, 4096),
+        (512, 4096, 10240),
+    }
+    _check(
+        "A8W8 CSV contains all verified LightX2V UMT5 shapes",
+        expected_shapes.issubset(actual_shapes),
+        f"found={sorted(actual_shapes)}",
+    )
+    _check(
+        "gfx1201 tuned rows use FP8 input/weight and passed correctness",
+        len(rows) >= 3
+        and set(rows["q_dtype_w"]) == {"torch.float8_e4m3fn"}
+        and (rows["errRatio"] == 0.0).all(),
+    )
+
+    gemm_path = os.path.join(
+        _REPO_ROOT, "csrc", "ck_gemm_a8w8", "gemm_a8w8.cu"
+    )
+    with open(gemm_path, encoding="utf-8") as handle:
+        gemm_source = handle.read()
+    _check(
+        "gfx1201 misses use a dedicated heuristic before generic gfx9 heuristics",
+        'if (gfx == "gfx1201")' in gemm_source
+        and "rowwise_gfx1201_heuristic_dispatch" in gemm_source,
+    )
+    _check(
+        "gfx1201 heuristic is a 16x16 WMMA instance",
+        "a8w8_rowwise_128x16x128x128_16x16" in gemm_source,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -916,6 +981,7 @@ def test_build_tune_dict_strict_unknown_kernel():
 
 if __name__ == "__main__":
     test_get_build_targets()
+    test_gfx1201_rowwise_ck_policy()
     test_gen_instances_filter(
         csv_path=REPRO_CSV,
         target_a=TARGET_C,
