@@ -1,6 +1,7 @@
 # AMD RDNA4 SageAttention2 Support Plan
 
-Status: bring-up implementation complete; gfx1201 hardware gates pending, 2026-08-02
+Status: native self-attention hardware gates passed; LightX2V integration and
+production video validation pending, 2026-08-02
 Target: `gfx1201` (RDNA4, wave32)
 Primary workload: Wan2.1 / Wan2.2 720P inference, head dimension 128
 
@@ -188,6 +189,37 @@ after both native WMMA stages pass ISA and correctness gates. Triton
 `num_stages` is not a direct FlyDSL tuning parameter and will not be carried
 over mechanically.
 
+### 6.1 First gfx1201 hardware result
+
+The 2026-08-02 720P sweep selected `BM128/BN32/WPE2/LDS_PAD16`, which is also
+the current production default. Across Wan2.1 A14B, Wan2.2 A14B and Wan2.2
+TI2V self-attention under USP8 it achieved:
+
+- `1.3359x` kernel-only geomean versus tuned FlyDSL BF16;
+- `1.2874x` full-call geomean versus tuned FlyDSL BF16;
+- `3.43x` to `3.55x` full-call speedup versus Triton Sage v1;
+- 40/40 correctness cases passed, including sequence tails 31/33/63/65/257;
+- minimum measured cosine similarity approximately `0.9988`.
+
+The winning final ISA uses wave32 and contains native INT8 QK WMMA, FP8 PV
+WMMA and packed FP8 conversion. Its recorded resources are 181 VGPR, 32 SGPR
+and 10,752 bytes LDS. BN64 increased pressure substantially (up to 256 VGPR
+and 19,456 bytes LDS), while WPE2 and WPE3 were effectively tied. The default
+therefore remains frozen at the measured winner.
+
+The second sweep is intentionally local rather than another Cartesian grid:
+
+| Candidate | Reason |
+| --- | --- |
+| `BM64/BN32/WPE2` | test a four-wave workgroup and two-workgroup residency |
+| `BM128/BN32/WPE2/LDS_PAD4,8` | isolate bank-conflict and LDS-footprint effects |
+| winner plus V LDS-register preload | port the proven GEMM2 latency-hiding pattern |
+| `BN16` prototype | exploratory register/LDS reduction; lower priority because KV iterations and barriers double |
+
+WPE4 and further BM256 variants are deprioritized because the first sweep
+shows that WPE is not the current ceiling and larger query workgroups lose
+consistently.
+
 ## 7. Aiter Integration Boundary
 
 New code should be isolated under the existing FlyDSL ownership boundary:
@@ -225,8 +257,8 @@ for A/B measurements and rollback.
 
 ### Phase 0: toolchain and ISA proof
 
-Status: source/ABI and pre-binary MLIR proof complete; final code object and
-hardware numerical checks pending.
+Status: complete on gfx1201 for the required native instruction and numerical
+gates.
 
 - Add an INT8 QK `16x16x16` FlyDSL microkernel.
 - Add an FP8 PV `16x16x16` FlyDSL microkernel.
@@ -239,9 +271,9 @@ Exit gate: both microkernels are correct and use the required native ISA.
 
 ### Phase 1: pre-quantized V2 attention core
 
-Status: dense non-causal self-attention core implemented for BM128/256 and
-BN32/64. Python AST, FlyDSL lowering and ROCDL lowering pass; hardware
-correctness/performance pending.
+Status: dense non-causal self-attention core implemented and hardware-validated
+for BM128/256 and BN32/64. The selected production tile beats the tuned BF16
+baseline at kernel-only and full-call scope.
 
 - Implement dense non-causal head-dim-128 core.
 - Accept pre-quantized Q/K/V and scales.
@@ -254,8 +286,9 @@ shapes.
 ### Phase 2: SageAttention2 preprocessing
 
 Status: bring-up wrapper reuses Aiter `sage_quant` with Q groups of 32 and K
-groups of BN, then creates RDNA-native transposed FP8 V storage. Native fusion,
-LSE and cross-attention preprocessing remain pending.
+groups of BN, then creates RDNA-native transposed FP8 V storage. Full-wrapper
+self-attention correctness and performance gates pass. Native fusion, LSE and
+cross-attention preprocessing remain pending.
 
 - Implement per-warp Q and per-block K INT8 quantization.
 - Fuse K smoothing subtraction into K quantization.
@@ -267,8 +300,10 @@ Exit gate: full wrapper is numerically equivalent to SageAttention2 semantics.
 
 ### Phase 3: Aiter dispatch
 
-Status: strict opt-in dispatch, explicit backend selection and Triton fallback
-implemented. Default enablement waits for the GPU gates.
+Status: strict dispatch, explicit backend selection and Triton fallback are
+implemented. LightX2V routes supported gfx1201 self-attention to V2 and keeps
+cross-attention on its tuned BF16 path; image-only integration validation is
+still required.
 
 - Add strict gfx1201 native support predicate.
 - Route `fav3_sage_wrapper_func` to FlyDSL V2.
@@ -311,8 +346,9 @@ The executable GPU gate lives in `aiter-tune-gfx1201`:
 
 - `tune/tune_sage_attention_v2_gfx1201.py` checks tail lengths 31/33/63/65/257,
   exact WMMA/conversion ISA, kernel-only latency and full-call latency;
-- `tune/launch_sage_attention_v2_tuning.sh` source-mounts Aiter or clones the
-  branch on tune hosts without an Aiter checkout;
+- `tune/launch_sage_attention_v2_tuning.sh` validates the Aiter revision baked
+  into a prebuilt image on tune hosts without an Aiter checkout or source
+  mount;
 - the 720P sweep compares native V2 with FlyDSL BF16 as the primary baseline
   and Triton Sage v1 as the secondary baseline.
 
@@ -361,14 +397,14 @@ The executable GPU gate lives in `aiter-tune-gfx1201`:
 
 ## 12. Immediate Work Order
 
-1. Run the correctness-only tune entry on gfx1201 and reject failing tile
-   families before any long benchmark.
-2. Verify final ISA contains signed INT8 QK WMMA, OCP E4M3 FP8 PV WMMA and
-   packed FP8 conversion; record VGPR/SGPR/LDS resources.
-3. Run Wan2.1/Wan2.2 720P kernel-only and full-call sweeps against FlyDSL BF16.
-4. Profile quantization and V transpose separately when core-only wins but the
-   full call loses.
-5. Tune LDS padding/prefetch/scheduling only after a numerically correct core
-   survives the initial BM/BN/WPE matrix.
-6. Make native V2 the gfx1201 default only after a repeatable full-call win;
-   keep short cross-attention on fallback unless it independently wins.
+1. Run the image-only LightX2V integration gate against the already validated
+   image and confirm native self-attention plus BF16 cross-attention routing.
+2. Generate representative Wan2.1 and Wan2.2 720P videos and compare quality,
+   peak memory and end-to-end DiT latency with the BF16 baseline.
+3. Run the focused BM64, LDS padding and V-register-preload sweep described in
+   Section 6.1; require at least a repeatable 2% full-call gain before changing
+   the frozen default.
+4. Treat BN16 as an isolated prototype and retain it only if reduced resource
+   pressure outweighs the doubled KV-loop/barrier count.
+5. Keep short cross-attention on the tuned BF16 path unless an asymmetric V2
+   implementation independently passes correctness and full-call gates.

@@ -256,7 +256,9 @@ def build_sage_attention_v2_core(
     V_LOAD_BATCHES = (V_LOAD_ITEMS + BLOCK_SIZE - 1) // BLOCK_SIZE
 
     gpu_arch = os.environ.get("FLYDSL_GPU_ARCH", "gfx1201")
-    path_tag = f"M{BLOCK_M}N{BLOCK_N}P{lds_padding}W{waves_per_eu}"
+    path_tag = (
+        f"M{BLOCK_M}N{BLOCK_N}P{lds_padding}W{waves_per_eu}H{num_heads}"
+    )
     allocator = SmemAllocator(
         None,
         arch=gpu_arch,
