@@ -1,7 +1,7 @@
 # AMD RDNA4 SageAttention2 Support Plan
 
-Status: native self-attention hardware gates passed; LightX2V integration and
-production video validation pending, 2026-08-02
+Status: native self-attention hardware gates passed; Ring LSE implemented and
+awaiting gfx1201 sampled-row validation, 2026-08-02
 Target: `gfx1201` (RDNA4, wave32)
 Primary workload: Wan2.1 / Wan2.2 720P inference, head dimension 128
 
@@ -16,7 +16,7 @@ algorithmic reference is the SageAttention SM89 path used by RTX 4090:
 - V quantized per channel to FP8;
 - QK computed by native INT8 WMMA;
 - PV computed by native FP8 WMMA with FP32 accumulation;
-- K smoothing preserved and LSE correction added when LSE support lands;
+- K smoothing preserved with corrected natural-log LSE output for Ring merge;
 - dense self-attention first, then Wan cross-attention after separate gates;
 - Aiter dispatches the native FlyDSL implementation on `gfx1201` and keeps the
   current Triton Sage v1 path as a fallback.
@@ -300,8 +300,9 @@ The initial support predicate is intentionally narrow:
 - head dimension 128;
 - BSHD or BHSD dense tensors;
 - no dropout, softcap, sliding window, bias, ALiBi or block-sparse LUT;
-- causal and non-causal handled only after each passes its own test gate;
-- self-attention, GQA and cross-attention enabled independently as they pass.
+- dense non-causal self-attention only;
+- optional natural-log LSE output with K-smoothing correction for Ring merge;
+- GQA and asymmetric cross-attention remain behind separate future gates.
 
 The canonical explicit selector is
 `config={"backend": "sage_attn_v2_gfx1201"}`. The older `flydsl_v2` and `native_v2`
@@ -343,10 +344,12 @@ shapes.
 
 ### Phase 2: SageAttention2 preprocessing
 
-Status: bring-up wrapper reuses Aiter `sage_quant` with Q groups of 32 and K
-groups of BN, then creates RDNA-native transposed FP8 V storage. Full-wrapper
-self-attention correctness and performance gates pass. Native fusion, LSE and
-cross-attention preprocessing remain pending.
+Status: the wrapper reuses Aiter `sage_quant` with Q groups of 32 and K groups
+of BN, then creates RDNA-native transposed FP8 V storage. Full-wrapper
+self-attention correctness and performance gates pass. Optional LSE writes
+`(m + log2(l)) * ln(2)` from the core's online-softmax state and adds the
+existing K-smoothing correction. Ring merge correctness requires its final
+gfx1201 sampled-row gate; native fusion and cross-attention remain pending.
 
 - Implement per-warp Q and per-block K INT8 quantization.
 - Fuse K smoothing subtraction into K quantization.
@@ -415,6 +418,9 @@ The executable GPU gate lives in `aiter-tune-gfx1201`:
   mount;
 - `tune/launch_sage_attention_v2_expert_tuning.sh` forces image-only execution
   of correctness, ISA, and the complete 16-candidate 720P expert sweep;
+- `tune/launch_sage_attention_v2_ring_lse_validation.sh` simulates all 16 Ring
+  K/V shards on one gfx1201 and compares the merged sampled rows and LSE with
+  an FP32 full-sequence reference;
 - the 720P sweep compares native V2 with FlyDSL BF16 as the primary baseline
   and Triton Sage v1 as the secondary baseline.
 

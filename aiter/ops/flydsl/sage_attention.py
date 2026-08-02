@@ -112,12 +112,15 @@ class PreparedSageAttentionGfx1201:
     k_scale: torch.Tensor
     v_scale: torch.Tensor
     out_padded: torch.Tensor
+    lse_padded: torch.Tensor | None
+    lse_delta: torch.Tensor | None
     batch_size: int
     valid_seq_len: int
     padded_seq_len: int
     num_heads: int
     output_dtype: str
     layout: str
+    return_lse: bool
     config: SageAttentionGfx1201Config
 
 
@@ -157,8 +160,6 @@ def sage_attention_v2_gfx1201_support_reason(
         return "attention_chunk > 1 is not implemented"
     if softcap != 0.0 or sm_margin != 0:
         return "softcap and sm_margin are not implemented"
-    if return_lse:
-        return "LSE output is not implemented"
     if block_lut is not None:
         return "block-sparse attention is not implemented"
 
@@ -187,13 +188,15 @@ def _get_kernel(
     pre_load_v: bool,
     kv_prefetch_mode: str,
     use_fp8_p_offset: bool,
+    return_lse: bool,
 ):
     logger.info(
         "[FlyDSL] dispatching native gfx1201 SageAttention2: "
         f"dtype={output_dtype}, H={num_heads}, D=128, "
         f"BM={block_m}, BN={block_n}, WPE={waves_per_eu}, "
         f"LDS_PAD={lds_padding}, PRE_LOAD_V={pre_load_v}, "
-        f"KV_PREFETCH={kv_prefetch_mode}, FP8_P_OFFSET={use_fp8_p_offset}"
+        f"KV_PREFETCH={kv_prefetch_mode}, FP8_P_OFFSET={use_fp8_p_offset}, "
+        f"RETURN_LSE={return_lse}"
     )
     return build_sage_attention_v2_core(
         num_heads=num_heads,
@@ -206,6 +209,7 @@ def _get_kernel(
         pre_load_v=pre_load_v,
         kv_prefetch_mode=kv_prefetch_mode,
         use_fp8_p_offset=use_fp8_p_offset,
+        return_lse=return_lse,
     )
 
 
@@ -264,11 +268,18 @@ def _prepare_sage_attention_v2_gfx1201_on_current_stream(
     *,
     layout: str = "bshd",
     smooth_k: bool = True,
+    return_lse: bool = False,
     config: Mapping[str, object] | None = None,
 ) -> PreparedSageAttentionGfx1201:
     """Quantize and lay out inputs for the native gfx1201 V2 core."""
 
-    reason = sage_attention_v2_gfx1201_support_reason(q, k, v, layout=layout)
+    reason = sage_attention_v2_gfx1201_support_reason(
+        q,
+        k,
+        v,
+        return_lse=return_lse,
+        layout=layout,
+    )
     if reason is not None:
         raise ValueError(f"native gfx1201 SageAttention2 is unavailable: {reason}")
 
@@ -295,9 +306,13 @@ def _prepare_sage_attention_v2_gfx1201_on_current_stream(
         sm_scale=softmax_scale,
         layout="bshd",
         smooth_k=smooth_k,
-        return_lse=False,
+        return_lse=return_lse,
     )
-    q_int8, q_scale, k_int8, k_scale, v_fp8, v_scale = quantized
+    if return_lse:
+        q_int8, q_scale, k_int8, k_scale, v_fp8, v_scale, lse_delta = quantized
+    else:
+        q_int8, q_scale, k_int8, k_scale, v_fp8, v_scale = quantized
+        lse_delta = None
 
     q_padded = _pad_bshd(q_int8, padded_seq_len)
     k_padded = _pad_bshd(k_int8, padded_seq_len)
@@ -310,6 +325,15 @@ def _prepare_sage_attention_v2_gfx1201_on_current_stream(
         dtype=q.dtype,
         device=q.device,
     )
+    lse_padded = (
+        torch.empty(
+            (batch, num_heads, padded_seq_len),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        if return_lse
+        else None
+    )
 
     output_dtype = "bf16" if q.dtype == torch.bfloat16 else "f16"
     return PreparedSageAttentionGfx1201(
@@ -320,12 +344,15 @@ def _prepare_sage_attention_v2_gfx1201_on_current_stream(
         k_scale=k_scale,
         v_scale=v_scale,
         out_padded=out_padded,
+        lse_padded=lse_padded,
+        lse_delta=lse_delta,
         batch_size=batch,
         valid_seq_len=valid_seq_len,
         padded_seq_len=padded_seq_len,
         num_heads=num_heads,
         output_dtype=output_dtype,
         layout=layout,
+        return_lse=return_lse,
         config=selected,
     )
 
@@ -338,6 +365,7 @@ def prepare_sage_attention_v2_gfx1201(
     *,
     layout: str = "bshd",
     smooth_k: bool = True,
+    return_lse: bool = False,
     config: Mapping[str, object] | None = None,
     stream: torch.cuda.Stream | None = None,
 ) -> PreparedSageAttentionGfx1201:
@@ -349,7 +377,13 @@ def prepare_sage_attention_v2_gfx1201(
             "native gfx1201 SageAttention2 requires FlyDSL "
             f">={_MIN_NATIVE_FLYDSL_VERSION}, found {flydsl.__version__}"
         )
-    reason = sage_attention_v2_gfx1201_support_reason(q, k, v, layout=layout)
+    reason = sage_attention_v2_gfx1201_support_reason(
+        q,
+        k,
+        v,
+        return_lse=return_lse,
+        layout=layout,
+    )
     if reason is not None:
         raise ValueError(f"native gfx1201 SageAttention2 is unavailable: {reason}")
     with torch.cuda.device(q.device.index):
@@ -366,6 +400,7 @@ def prepare_sage_attention_v2_gfx1201(
                 softmax_scale,
                 layout=layout,
                 smooth_k=smooth_k,
+                return_lse=return_lse,
                 config=config,
             )
 
@@ -374,7 +409,7 @@ def launch_prepared_sage_attention_v2_gfx1201(
     prepared: PreparedSageAttentionGfx1201,
     *,
     stream: torch.cuda.Stream | None = None,
-) -> torch.Tensor:
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Launch only the native attention core on already prepared tensors."""
 
     q_device = prepared.q_int8.device
@@ -395,6 +430,7 @@ def launch_prepared_sage_attention_v2_gfx1201(
             selected.pre_load_v,
             selected.kv_prefetch_mode,
             selected.use_fp8_p_offset,
+            prepared.return_lse,
         )
         kernel(
             prepared.q_int8,
@@ -408,12 +444,19 @@ def launch_prepared_sage_attention_v2_gfx1201(
             prepared.padded_seq_len,
             prepared.valid_seq_len,
             stream=launch_stream,
+            lse=prepared.lse_padded,
         )
 
     out = prepared.out_padded[:, : prepared.valid_seq_len]
     if prepared.layout == "bhsd":
-        return out.transpose(1, 2)
-    return out
+        out = out.transpose(1, 2)
+    if not prepared.return_lse:
+        return out
+
+    lse = prepared.lse_padded[..., : prepared.valid_seq_len]
+    if prepared.lse_delta is not None:
+        lse = lse + prepared.lse_delta.to(lse.dtype)
+    return out, lse
 
 
 def flydsl_sage_attention_v2_func(
@@ -424,9 +467,10 @@ def flydsl_sage_attention_v2_func(
     *,
     layout: str = "bshd",
     smooth_k: bool = True,
+    return_lse: bool = False,
     config: Mapping[str, object] | None = None,
     stream: torch.cuda.Stream | None = None,
-) -> torch.Tensor:
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Run preprocessing and the native gfx1201 SageAttention2 core."""
 
     prepared = prepare_sage_attention_v2_gfx1201(
@@ -436,8 +480,12 @@ def flydsl_sage_attention_v2_func(
         softmax_scale,
         layout=layout,
         smooth_k=smooth_k,
+        return_lse=return_lse,
         config=config,
         stream=stream,
     )
-    out = launch_prepared_sage_attention_v2_gfx1201(prepared, stream=stream)
-    return out.contiguous()
+    result = launch_prepared_sage_attention_v2_gfx1201(prepared, stream=stream)
+    if not return_lse:
+        return result.contiguous()
+    out, lse = result
+    return out.contiguous(), lse.contiguous()

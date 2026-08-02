@@ -200,6 +200,7 @@ def build_sage_attention_v2_core(
     pre_load_v: bool = False,
     kv_prefetch_mode: str | None = None,
     use_fp8_p_offset: bool = True,
+    return_lse: bool = False,
 ):
     """Build the pre-quantized, non-causal gfx1201 SageAttention2 core.
 
@@ -249,6 +250,7 @@ def build_sage_attention_v2_core(
     PREFETCH_K = kv_prefetch_mode in ("k", "kv")
     PREFETCH_V = kv_prefetch_mode in ("v", "kv")
     USE_FP8_P_OFFSET = bool(use_fp8_p_offset)
+    RETURN_LSE = bool(return_lse)
     BLOCK_SIZE = (BLOCK_M // ROWS_PER_WAVE) * WARP_SIZE
     NUM_WAVES = BLOCK_M // ROWS_PER_WAVE
     N_SUB_TILES = BLOCK_N // K_SUB_N
@@ -280,6 +282,7 @@ def build_sage_attention_v2_core(
     path_tag = (
         f"M{BLOCK_M}N{BLOCK_N}P{lds_padding}W{waves_per_eu}H{num_heads}"
         f"V{int(PRE_LOAD_V)}G{kv_prefetch_mode}O{int(USE_FP8_P_OFFSET)}"
+        f"L{int(RETURN_LSE)}"
     )
     allocator = SmemAllocator(
         None,
@@ -303,6 +306,7 @@ def build_sage_attention_v2_core(
         KScale: fx.Pointer,
         VScale: fx.Pointer,
         O: fx.Pointer,  # noqa: E741
+        LSE: fx.Pointer,
         padded_seq_len: fx.Int32,
         valid_seq_len: fx.Int32,
     ):
@@ -321,6 +325,7 @@ def build_sage_attention_v2_core(
         ks_ptr = _pointer_to_llvm_ptr(KScale)
         vs_ptr = _pointer_to_llvm_ptr(VScale)
         o_ptr = _pointer_to_llvm_ptr(O)
+        lse_ptr = _pointer_to_llvm_ptr(LSE)
 
         def _fadd(a, b):
             return arith.addf(_raw(a), _raw(b), fastmath=fm_fast)
@@ -415,6 +420,9 @@ def build_sage_attention_v2_core(
         def v_global_index(d, token):
             return ((batch_idx * num_heads + head_idx) * head_dim + d) * seq + token
 
+        def lse_global_index(token):
+            return (batch_idx * num_heads + head_idx) * seq + token
+
         q_in_bounds = arith.cmpi(
             arith.CmpIPredicate.slt,
             _raw(q_row),
@@ -444,6 +452,7 @@ def build_sage_attention_v2_core(
         c_neg_inf = fx.Float32(float("-inf"))
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
+        c_ln2 = fx.Float32(host_math.log(2.0))
         c_zero_v8f32 = Vec.filled(8, 0.0, fx.Float32).ir_value()
         c_zero_v8i32 = Vec.filled(8, 0, fx.Int32).ir_value()
         c_neg_fp8_p_offset = fx.Float32(-_FP8_P_OFFSET)
@@ -782,6 +791,16 @@ def build_sage_attention_v2_core(
         )
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(8).ir_value()
         if q_in_bounds:
+            if const_expr(RETURN_LSE):
+                if klane == 0:
+                    log2_l = rocdl.log(T.f32, _raw(loop_results[1]))
+                    lse = _fmul(_fadd(loop_results[0], log2_l), c_ln2)
+                    _global_store(
+                        lse_ptr,
+                        lse_global_index(q_row),
+                        T.f32,
+                        lse,
+                    )
             for dc in range_constexpr(D_CHUNKS):
                 d_col = fx.Index(dc * GFX1201_WMMA_N) + klane * 8
                 scale_index = (batch_idx * num_heads + head_idx) * head_dim + d_col
@@ -810,6 +829,7 @@ def build_sage_attention_v2_core(
         KScale: fx.Pointer,
         VScale: fx.Pointer,
         O: fx.Pointer,  # noqa: E741
+        LSE: fx.Pointer,
         batch_size: fx.Int32,
         padded_seq_len: fx.Int32,
         valid_seq_len: fx.Int32,
@@ -834,6 +854,7 @@ def build_sage_attention_v2_core(
             KScale,
             VScale,
             O,
+            LSE,
             padded_seq_len,
             valid_seq_len,
         )
@@ -854,6 +875,8 @@ def build_sage_attention_v2_core(
     }
 
     def _ptr_arg(value):
+        if value is None:
+            return flyc.from_c_void_p(fx.Uint8, 0)
         if hasattr(value, "data_ptr"):
             type_name = type(value).__name__
             module_name = type(value).__module__
@@ -877,10 +900,11 @@ def build_sage_attention_v2_core(
         padded_seq_len,
         valid_seq_len,
         stream=None,
+        lse=None,
     ):
         args = tuple(
             _ptr_arg(value)
-            for value in (q, k, v, q_scale, k_scale, v_scale, out)
+            for value in (q, k, v, q_scale, k_scale, v_scale, out, lse)
         )
         compiled = getattr(launch_sage_attention_core, "_compiled", None)
         runtime_args = (

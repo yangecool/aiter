@@ -97,6 +97,7 @@ def _maybe_run_native_gfx1201_sage(
         softmax_scale,
         layout=layout,
         smooth_k=smooth_k,
+        return_lse=return_lse,
         config=config,
     )
 

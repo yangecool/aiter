@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import types
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPO_ROOT / "aiter/ops/flydsl/sage_attention.py"
+KERNEL_PATH = REPO_ROOT / "aiter/ops/flydsl/kernels/sage_attention_gfx1201.py"
 WRAPPER_PATH = REPO_ROOT / "aiter/ops/triton/attention/fav3_sage.py"
 SOURCE = CONFIG_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
@@ -31,7 +33,54 @@ exec(
 CONFIG = NAMESPACE["SageAttentionGfx1201Config"]
 
 
+class _FakeDevice:
+    type = "cuda"
+
+
+class _FakeTensor:
+    def __init__(self, dtype):
+        self.shape = (1, 64, 4, 128)
+        self.ndim = 4
+        self.device = _FakeDevice()
+        self.dtype = dtype
+        self.requires_grad = False
+
+
+FAKE_BF16 = object()
+SUPPORT_NAMESPACE = {
+    "torch": types.SimpleNamespace(
+        Tensor=_FakeTensor,
+        bfloat16=FAKE_BF16,
+        float16=object(),
+    )
+}
+SUPPORT_FUNCTION = next(
+    node
+    for node in TREE.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name == "sage_attention_v2_gfx1201_support_reason"
+)
+exec(
+    compile(
+        ast.Module(body=[SUPPORT_FUNCTION], type_ignores=[]),
+        str(CONFIG_PATH),
+        "exec",
+    ),
+    SUPPORT_NAMESPACE,
+)
+SUPPORT_REASON = SUPPORT_NAMESPACE["sage_attention_v2_gfx1201_support_reason"]
+
+
 class SageAttentionGfx1201ConfigTests(unittest.TestCase):
+    def test_native_contract_accepts_lse_for_ring_attention(self):
+        q = _FakeTensor(FAKE_BF16)
+        self.assertIsNone(SUPPORT_REASON(q, q, q, return_lse=True))
+
+        kernel_source = KERNEL_PATH.read_text(encoding="utf-8")
+        self.assertIn("RETURN_LSE = bool(return_lse)", kernel_source)
+        self.assertIn("log2_l = rocdl.log", kernel_source)
+        self.assertIn("lse_global_index(q_row)", kernel_source)
+
     def test_canonical_backend_names_sage_and_target_arch(self):
         wrapper_tree = ast.parse(WRAPPER_PATH.read_text(encoding="utf-8"))
         backends = next(
