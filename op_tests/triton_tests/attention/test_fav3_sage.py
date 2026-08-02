@@ -27,6 +27,19 @@ ATOL_fp8 = 3.0e-1
 RTOL_fp8 = 2.5e-1
 
 
+def test_gfx1201_sage_default_config(monkeypatch):
+    monkeypatch.setattr(arch_info, "_CACHED_ARCH", "gfx1201")
+
+    assert get_sage_fwd_configs() == {
+        "BLOCK_M": 256,
+        "BLOCK_N": 64,
+        "waves_per_eu": 3,
+        "PRE_LOAD_V": False,
+        "num_stages": 2,
+        "num_warps": 8,
+    }
+
+
 def compare_accuracy(current, reference):
     """Print quick statistics comparing FP8 and SageAttn tensors."""
     current_f = current.float()

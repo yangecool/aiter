@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from typing import Optional, Tuple
+import os
 import torch
 import aiter
 import triton
@@ -14,6 +15,86 @@ from aiter.ops.triton._triton_kernels.attention.fav3_sage_attention import (
 from aiter.ops.triton.quant.sage_attention_quant_wrappers import sage_quant
 
 from aiter.ops.triton.utils._triton import arch_info
+
+
+_GFX1201_NATIVE_ENV = "AITER_SAGE_GFX1201_NATIVE"
+_GFX1201_NATIVE_BACKENDS = ("flydsl_v2", "native_v2")
+
+
+def _native_gfx1201_requested(config: Optional[dict]) -> tuple[bool, bool]:
+    explicit = bool(
+        config is not None
+        and config.get("backend") in _GFX1201_NATIVE_BACKENDS
+    )
+    env_value = os.environ.get(_GFX1201_NATIVE_ENV, "0").strip().lower()
+    enabled = env_value not in ("", "0", "false", "no", "off")
+    return explicit or enabled, explicit
+
+
+def _maybe_run_native_gfx1201_sage(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    softmax_scale: Optional[float],
+    causal: bool,
+    window_size: Tuple[int, int],
+    attention_chunk: int,
+    softcap: float,
+    sm_margin: int,
+    return_lse: bool,
+    layout: str,
+    config: Optional[dict],
+    block_lut: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    smooth_k: bool,
+):
+    requested, explicit = _native_gfx1201_requested(config)
+    if not requested:
+        return None
+
+    if arch_info.get_arch() != "gfx1201":
+        if explicit:
+            raise RuntimeError("native SageAttention2 backend requires gfx1201")
+        return None
+
+    from aiter.ops.flydsl import is_flydsl_available
+
+    if not is_flydsl_available():
+        if explicit:
+            raise RuntimeError("native gfx1201 SageAttention2 requires FlyDSL")
+        return None
+
+    from aiter.ops.flydsl.sage_attention import (
+        flydsl_sage_attention_v2_func,
+        sage_attention_v2_gfx1201_support_reason,
+    )
+
+    reason = sage_attention_v2_gfx1201_support_reason(
+        q,
+        k,
+        v,
+        causal=causal,
+        window_size=window_size,
+        attention_chunk=attention_chunk,
+        softcap=softcap,
+        sm_margin=sm_margin,
+        return_lse=return_lse,
+        layout=layout,
+        block_lut=block_lut,
+    )
+    if reason is not None:
+        if explicit:
+            raise ValueError(f"native gfx1201 SageAttention2 is unavailable: {reason}")
+        return None
+
+    return flydsl_sage_attention_v2_func(
+        q,
+        k,
+        v,
+        softmax_scale,
+        layout=layout,
+        smooth_k=smooth_k,
+        config=config,
+    )
 
 
 def get_sage_fwd_configs():
@@ -32,6 +113,18 @@ def get_sage_fwd_configs():
             "BLOCK_M": 256,
             "BLOCK_N": 128,
             "waves_per_eu": 2,
+            "PRE_LOAD_V": False,
+            "num_stages": 2,
+            "num_warps": 8,
+        }
+    elif arch == "gfx1201":
+        # First RDNA4 candidate, derived from the gfx1201 FlyDSL FMHA winner.
+        # Sage uses these tiles for both attention and Q/K quantization, so this
+        # remains subject to shape-level accuracy and performance tuning.
+        return {
+            "BLOCK_M": 256,
+            "BLOCK_N": 64,
+            "waves_per_eu": 3,
             "PRE_LOAD_V": False,
             "num_stages": 2,
             "num_warps": 8,
@@ -56,7 +149,7 @@ class _FAv3SageWrapperFunc(torch.autograd.Function):
     the quantization internally, maintaining backward compatibility with
     high-precision training workflows.
 
-    Forward: BF16/FP32 -> Int8 (Q & K) + FP16 V -> sage_attn -> FP32 output
+    Forward: BF16/FP32 -> INT8 (Q/K) + FP8 (V) -> sage_attn -> BF16 output
     Backward: not supported yet
     """
 
@@ -231,11 +324,11 @@ def fav3_sage_wrapper_func(
     smooth_k: bool = True,
 ):
     """
-    SageAttention v1 high-precision entry point.
+    High-precision SageAttention compatibility entry point.
 
-    This function accepts high-precision (BF16/FP32) tensors and internally
-    quantizes them to Int8/BF16 for computation. The output and gradients remain
-    in high precision (FP32 for output, input dtype for gradients).
+    The experimental gfx1201 native V2 path is selected with
+    ``AITER_SAGE_GFX1201_NATIVE=1`` or ``config={"backend": "flydsl_v2"}``.
+    Unsupported calls and the default path continue to use Triton Sage v1.
 
     This API is designed for seamless integration with existing training code
     that uses BF16/FP32 tensors, providing FP8 acceleration without requiring
@@ -262,7 +355,7 @@ def fav3_sage_wrapper_func(
         smooth_k: Whether to apply k-smoothing to the K tensor
 
     Returns:
-        out: Output tensor [batch, seqlen, num_q_heads, head_dim] or [batch, num_q_heads, seqlen, head_dim] (FP32)
+        out: Output tensor [batch, seqlen, num_q_heads, head_dim] or [batch, num_q_heads, seqlen, head_dim] (BF16)
 
     Note:
         - Supports GQA/MQA (num_q_heads != num_kv_heads)
@@ -270,6 +363,25 @@ def fav3_sage_wrapper_func(
         - backward is not yet supported
         - softcap is not yet supported in FP8 mode
     """
+
+    native_result = _maybe_run_native_gfx1201_sage(
+        q,
+        k,
+        v,
+        softmax_scale,
+        causal,
+        window_size,
+        attention_chunk,
+        softcap,
+        sm_margin,
+        return_lse,
+        layout,
+        config,
+        block_lut,
+        smooth_k,
+    )
+    if native_result is not None:
+        return native_result
 
     # Check that inputs are high precision
     assert q.dtype in [torch.float16, torch.bfloat16, torch.float32], (
@@ -337,7 +449,7 @@ def fav3_sage_func(
     Args:
         q: Query tensor [batch, seqlen, num_q_heads, head_dim] (int8)
         k: Key tensor [batch, seqlen, num_kv_heads, head_dim] (int8)
-        v: Value tensor [batch, seqlen, num_kv_heads, head_dim] (BF16/FP16)
+        v: Value tensor [batch, seqlen, num_kv_heads, head_dim] (FP8)
         q_descale: Descale factors for Q (float32)
         k_descale: Descale factors for K (float32)
         v_descale: Descale factors for V (float32)
@@ -357,7 +469,7 @@ def fav3_sage_func(
         use_block_sparse: Whether to use block-sparse attention
 
     Returns:
-        out: Output tensor [batch, seqlen, num_q_heads, head_dim] or [batch, num_q_heads, seqlen, head_dim] (FP32)
+        out: Output tensor [batch, seqlen, num_q_heads, head_dim] or [batch, num_q_heads, seqlen, head_dim] (BF16)
     """
 
     # --- 1. Layout & Dimension Mapping ---

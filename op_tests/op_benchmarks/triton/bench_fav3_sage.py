@@ -53,6 +53,21 @@ def get_arch():
     return triton.runtime.driver.active.get_current_target().arch
 
 
+def get_benchmark_sage_config(args):
+    """Apply optional CLI overrides to the architecture default Sage config."""
+    config = get_sage_fwd_configs()
+    overrides = {
+        "BLOCK_M": getattr(args, "sage_block_m", None),
+        "BLOCK_N": getattr(args, "sage_block_n", None),
+        "waves_per_eu": getattr(args, "sage_waves_per_eu", None),
+        "PRE_LOAD_V": getattr(args, "sage_pre_load_v", None),
+        "num_stages": getattr(args, "sage_num_stages", None),
+        "num_warps": getattr(args, "sage_num_warps", None),
+    }
+    config.update({key: value for key, value in overrides.items() if value is not None})
+    return config
+
+
 def layout_preprocess(
     q,
     k,
@@ -214,7 +229,7 @@ def make_block_attn_mask(
             # List-of-masks flow: this helper is not used; caller uses the list.
             return None
         mask_t, batch, nqb, nkb = loaded
-        config = get_sage_fwd_configs()
+        config = get_benchmark_sage_config(args)
         BLOCK_M, BLOCK_N = config["BLOCK_M"], config["BLOCK_N"]
         expected_nqb = (N_CTX_Q + BLOCK_M - 1) // BLOCK_M
         expected_nkb = (N_CTX_K + BLOCK_N - 1) // BLOCK_N
@@ -230,7 +245,7 @@ def make_block_attn_mask(
             mask_t = mask_t.unsqueeze(1).expand(BATCH, args.hq, nqb, nkb).clone()
         return mask_t
     # Only block_sparsity set: random mask (4D)
-    config = get_sage_fwd_configs()
+    config = get_benchmark_sage_config(args)
     BLOCK_M, BLOCK_N = config["BLOCK_M"], config["BLOCK_N"]
     num_q_blocks = (N_CTX_Q + BLOCK_M - 1) // BLOCK_M
     num_kv_blocks = (N_CTX_K + BLOCK_N - 1) // BLOCK_N
@@ -248,11 +263,12 @@ def sparse_flops_from_lut(
     HQ: int,
     D_HEAD: int,
     D_HEAD_V: int,
+    config: Optional[dict] = None,
 ) -> Tuple[float, float]:
     """Return (sparse_flops, total_flops_dense). Uses config BLOCK_M, BLOCK_N."""
     kv_block_indices, lut_start, lut_count = block_lut
     num_sparse_pairs = lut_count.sum().item()
-    config = get_sage_fwd_configs()
+    config = config or get_sage_fwd_configs()
     BLOCK_M, BLOCK_N = config["BLOCK_M"], config["BLOCK_N"]
     num_q_blocks = (N_CTX_Q + BLOCK_M - 1) // BLOCK_M
     num_kv_blocks = (N_CTX_K + BLOCK_N - 1) // BLOCK_N
@@ -469,6 +485,7 @@ def fav3_sage_forward_func(
     causal: bool,
     layout: Literal["bshd", "bhsd"],
     block_lut: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+    config: Optional[dict] = None,
 ):
     head_dim = q.shape[-1]
     softmax_scale = head_dim**-0.5
@@ -482,6 +499,7 @@ def fav3_sage_forward_func(
         return_lse=False,
         layout=layout,
         block_lut=block_lut,
+        config=config,
     )
 
 
@@ -678,7 +696,16 @@ def primary_output(result):
 
 
 def attn_forward_func(
-    q, k, v, func_name, softmax_scale, k_smooth, layout, dtype, block_lut=None
+    q,
+    k,
+    v,
+    func_name,
+    softmax_scale,
+    k_smooth,
+    layout,
+    dtype,
+    block_lut=None,
+    sage_config=None,
 ):
     if func_name == "fav3_sage":  # fav3 sage hybrid
         fn = fav3_sage_forward_func(
@@ -688,6 +715,7 @@ def attn_forward_func(
             causal=False,
             layout=layout,
             block_lut=block_lut,
+            config=sage_config,
         )
     else:
         q, k, v = layout_preprocess(q, k, v, layout=layout, target_layout="bshd")
@@ -747,6 +775,7 @@ def bench_kernel(
 
     softmax_scale = 1.0 / (D_HEAD**0.5)
     k_smooth = args.k_smooth
+    sage_config = get_benchmark_sage_config(args)
 
     # FLOPS calculation variables (same OPS definition as plan)
     total_flops = 0.0
@@ -773,6 +802,7 @@ def bench_kernel(
         layout=args.layout,
         dtype=arg_to_torch_dtype[args.dtype],
         block_lut=block_lut,
+        sage_config=sage_config,
     )
     rep = getattr(args, "rep", 100)
     warmup = getattr(args, "warmup", 25)
@@ -792,7 +822,7 @@ def bench_kernel(
             q_bshd, k_bshd, v_bshd = layout_preprocess(
                 q, k, v, layout=args.layout, target_layout="bshd"
             )
-            config = get_sage_fwd_configs()
+            config = sage_config
             BLOCK_M, BLOCK_N = config["BLOCK_M"], config["BLOCK_N"]
             ref_out = attention_ref_block_sparse(
                 q_bshd,
@@ -823,6 +853,7 @@ def bench_kernel(
                     layout=args.layout,
                     dtype=arg_to_torch_dtype[args.dtype],
                     block_lut=ref_block_lut,
+                    sage_config=sage_config,
                 )()
             )
 
@@ -855,7 +886,14 @@ def bench_kernel(
     sparse_flops = None
     if block_lut is not None:
         sparse_flops, _ = sparse_flops_from_lut(
-            block_lut, BATCH, N_CTX_Q, N_CTX_K, HQ, D_HEAD, D_HEAD_V
+            block_lut,
+            BATCH,
+            N_CTX_Q,
+            N_CTX_K,
+            HQ,
+            D_HEAD,
+            D_HEAD_V,
+            config=sage_config,
         )
 
     # return ms
@@ -1017,7 +1055,7 @@ def run_benchmark_block_sparse_repetitions(args):
     q, k, v = layout_preprocess(q, k, v, layout="bhsd", target_layout=layout)
 
     total_flops = 2.0 * BATCH * HQ * N_CTX_Q * N_CTX_K * (D_HEAD + D_HEAD_V)
-    config = get_sage_fwd_configs()
+    config = get_benchmark_sage_config(args)
     BLOCK_M, BLOCK_N = config["BLOCK_M"], config["BLOCK_N"]
     num_q_blocks = (N_CTX_Q + BLOCK_M - 1) // BLOCK_M
     num_kv_blocks = (N_CTX_K + BLOCK_N - 1) // BLOCK_N
@@ -1056,7 +1094,14 @@ def run_benchmark_block_sparse_repetitions(args):
         tflops = ops_per_sec / 1e12
         throughputs_tflops.append(tflops)
         sparse_flops, _ = sparse_flops_from_lut(
-            block_lut, BATCH, N_CTX_Q, N_CTX_K, HQ, D_HEAD, D_HEAD_V
+            block_lut,
+            BATCH,
+            N_CTX_Q,
+            N_CTX_K,
+            HQ,
+            D_HEAD,
+            D_HEAD_V,
+            config=config,
         )
         effective_tflops = (sparse_flops / (ms * 1e-3)) / 1e12
         effective_tflops_list.append(effective_tflops)
@@ -1163,7 +1208,7 @@ def run_benchmark_masks_list(
     """Run benchmark for each mask in the list; each mask defines (BATCH, N_CTX_Q, N_CTX_K) from its shape."""
     torch.manual_seed(20)
     device = "cuda"
-    config = get_sage_fwd_configs()
+    config = get_benchmark_sage_config(args)
     BLOCK_M, BLOCK_N = config["BLOCK_M"], config["BLOCK_N"]
 
     @triton.testing.perf_report(create_benchmark_configs_masks(args, masks_list))
@@ -1267,6 +1312,27 @@ def parse_args():
     #     help="fav3 fp8 sagev1 hybrid kernel: per block quantization for Q/K, per tensor quantization for V, QK in int8, PV in fp8, accumulation in fp32.",
     # )
     parser.add_argument("-k_smooth", action="store_true", default=True)
+    parser.add_argument(
+        "--sage-block-m",
+        type=int,
+        default=None,
+        help="Override FAv3 Sage BLOCK_M for attention and Q quantization.",
+    )
+    parser.add_argument(
+        "--sage-block-n",
+        type=int,
+        default=None,
+        help="Override FAv3 Sage BLOCK_N for attention and K/V quantization.",
+    )
+    parser.add_argument("--sage-waves-per-eu", type=int, default=None)
+    parser.add_argument("--sage-num-stages", type=int, default=None)
+    parser.add_argument("--sage-num-warps", type=int, default=None)
+    parser.add_argument(
+        "--sage-pre-load-v",
+        type=str2bool,
+        default=None,
+        help="Override PRE_LOAD_V (true/false).",
+    )
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("-print_vgpr", action="store_true", default=False)
     parser.add_argument("--layout", type=str, default="bshd", help=supported_layouts())
@@ -1361,6 +1427,8 @@ def main():
     args = parse_args()
 
     args.fav3_sage = not args.fav3_fp8 and not args.aiter_fp8 and not args.aiter_bf16
+    if args.fav3_sage:
+        logger.info("FAv3 Sage config: %s", get_benchmark_sage_config(args))
 
     # Handle captured input mode separately
     if args.load_captured:
