@@ -42,6 +42,7 @@ class SageAttentionGfx1201Config:
     block_n: int = 32
     waves_per_eu: int = 2
     lds_padding: int = 16
+    pre_load_v: bool = False
 
     @classmethod
     def from_mapping(
@@ -59,11 +60,14 @@ class SageAttentionGfx1201Config:
             lds_padding=int(
                 config.get("lds_padding", config.get("LDS_PADDING", 16))
             ),
+            pre_load_v=bool(
+                config.get("pre_load_v", config.get("PRE_LOAD_V", False))
+            ),
         )
 
     def validate(self) -> None:
-        if self.block_m not in (128, 256):
-            raise ValueError("native gfx1201 Sage BLOCK_M must be 128 or 256")
+        if self.block_m not in (64, 128, 256):
+            raise ValueError("native gfx1201 Sage BLOCK_M must be 64, 128 or 256")
         if self.block_n not in (32, 64):
             raise ValueError("native gfx1201 Sage BLOCK_N must be 32 or 64")
         if self.waves_per_eu not in (1, 2, 3, 4):
@@ -153,12 +157,13 @@ def _get_kernel(
     block_n: int,
     waves_per_eu: int,
     lds_padding: int,
+    pre_load_v: bool,
 ):
     logger.info(
         "[FlyDSL] dispatching native gfx1201 SageAttention2: "
         f"dtype={output_dtype}, H={num_heads}, D=128, "
         f"BM={block_m}, BN={block_n}, WPE={waves_per_eu}, "
-        f"LDS_PAD={lds_padding}"
+        f"LDS_PAD={lds_padding}, PRE_LOAD_V={pre_load_v}"
     )
     return build_sage_attention_v2_core(
         num_heads=num_heads,
@@ -168,6 +173,7 @@ def _get_kernel(
         block_n=block_n,
         waves_per_eu=waves_per_eu,
         lds_padding=lds_padding,
+        pre_load_v=pre_load_v,
     )
 
 
@@ -354,6 +360,7 @@ def launch_prepared_sage_attention_v2_gfx1201(
             selected.block_n,
             selected.waves_per_eu,
             selected.lds_padding,
+            selected.pre_load_v,
         )
         kernel(
             prepared.q_int8,

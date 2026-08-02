@@ -196,6 +196,7 @@ def build_sage_attention_v2_core(
     block_n: int = 32,
     waves_per_eu: int = 2,
     lds_padding: int = 16,
+    pre_load_v: bool = False,
 ):
     """Build the pre-quantized, non-causal gfx1201 SageAttention2 core.
 
@@ -215,8 +216,8 @@ def build_sage_attention_v2_core(
         raise ValueError("gfx1201 SageAttention2 currently requires head_dim=128")
     if output_dtype not in ("bf16", "f16"):
         raise ValueError(f"unsupported Sage output dtype: {output_dtype}")
-    if block_m not in (128, 256):
-        raise ValueError("Sage block_m must be 128 or 256")
+    if block_m not in (64, 128, 256):
+        raise ValueError("Sage block_m must be 64, 128 or 256")
     if block_n not in (32, 64):
         raise ValueError("Sage block_n must be 32 or 64")
     if lds_padding not in (4, 8, 16):
@@ -232,6 +233,7 @@ def build_sage_attention_v2_core(
 
     BLOCK_M = int(block_m)
     BLOCK_N = int(block_n)
+    PRE_LOAD_V = bool(pre_load_v)
     BLOCK_SIZE = (BLOCK_M // ROWS_PER_WAVE) * WARP_SIZE
     NUM_WAVES = BLOCK_M // ROWS_PER_WAVE
     N_SUB_TILES = BLOCK_N // K_SUB_N
@@ -258,6 +260,7 @@ def build_sage_attention_v2_core(
     gpu_arch = os.environ.get("FLYDSL_GPU_ARCH", "gfx1201")
     path_tag = (
         f"M{BLOCK_M}N{BLOCK_N}P{lds_padding}W{waves_per_eu}H{num_heads}"
+        f"V{int(PRE_LOAD_V)}"
     )
     allocator = SmemAllocator(
         None,
@@ -430,6 +433,19 @@ def build_sage_attention_v2_core(
         def reduction_peer(value):
             return fx.Float32(value).shuffle_xor(peer_i32, width_i32)
 
+        def _load_v_fragment(st_idx, pks, dc):
+            d_pos = fx.Index(dc * GFX1201_WMMA_N) + lane16
+            token_pos = (
+                st_idx * K_SUB_N
+                + pks * WMMA_K
+                + klane * WMMA_LANE_K
+            )
+            return Vec.load(
+                v8i8_type,
+                lds,
+                [LDS_V_BASE + d_pos * V_STRIDE + token_pos],
+            )
+
         init_args = [_raw(c_neg_inf), _raw(c_zero_f)]
         for _ in range_constexpr(D_CHUNKS):
             init_args.append(c_zero_v8f32)
@@ -566,25 +582,46 @@ def build_sage_attention_v2_core(
                     )
                 p_fragments.append(p_subtile)
 
-            for pks in range_constexpr(PV_K_STEPS):
-                for dc in range_constexpr(D_CHUNKS):
-                    d_pos = fx.Index(dc * GFX1201_WMMA_N) + lane16
-                    for st_idx in range_constexpr(N_SUB_TILES):
-                        token_pos = (
-                            st_idx * K_SUB_N
-                            + pks * WMMA_K
-                            + klane * WMMA_LANE_K
-                        )
-                        v_bytes = Vec.load(
-                            v8i8_type,
-                            lds,
-                            [LDS_V_BASE + d_pos * V_STRIDE + token_pos],
-                        )
-                        o_accs[dc] = _wmma_pv(
-                            _pack_i8_fragment(v_bytes),
-                            p_fragments[st_idx][pks],
-                            o_accs[dc],
-                        )
+            if const_expr(PRE_LOAD_V):
+                current_v = []
+                for st_idx in range_constexpr(N_SUB_TILES):
+                    current_v.append(_load_v_fragment(st_idx, 0, 0))
+
+                for pks in range_constexpr(PV_K_STEPS):
+                    for dc in range_constexpr(D_CHUNKS):
+                        next_dc = dc + 1
+                        next_pks = pks
+                        if const_expr(next_dc >= D_CHUNKS):
+                            next_dc = 0
+                            next_pks = pks + 1
+                        has_next = const_expr(next_pks < PV_K_STEPS)
+
+                        next_v = []
+                        if const_expr(has_next):
+                            for st_idx in range_constexpr(N_SUB_TILES):
+                                next_v.append(
+                                    _load_v_fragment(st_idx, next_pks, next_dc)
+                                )
+
+                        for st_idx in range_constexpr(N_SUB_TILES):
+                            o_accs[dc] = _wmma_pv(
+                                _pack_i8_fragment(current_v[st_idx]),
+                                p_fragments[st_idx][pks],
+                                o_accs[dc],
+                            )
+
+                        if const_expr(has_next):
+                            current_v = next_v
+            else:
+                for pks in range_constexpr(PV_K_STEPS):
+                    for dc in range_constexpr(D_CHUNKS):
+                        for st_idx in range_constexpr(N_SUB_TILES):
+                            v_bytes = _load_v_fragment(st_idx, pks, dc)
+                            o_accs[dc] = _wmma_pv(
+                                _pack_i8_fragment(v_bytes),
+                                p_fragments[st_idx][pks],
+                                o_accs[dc],
+                            )
 
             gpu.barrier()
             m_running = m_new

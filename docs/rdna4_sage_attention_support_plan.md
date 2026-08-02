@@ -216,6 +216,12 @@ The second sweep is intentionally local rather than another Cartesian grid:
 | winner plus V LDS-register preload | port the proven GEMM2 latency-hiding pattern |
 | `BN16` prototype | exploratory register/LDS reduction; lower priority because KV iterations and barriers double |
 
+BM64, padding 4/8 and the optional V LDS-register preload are implemented as
+explicit tuning configurations. The measured default remains unchanged and
+the new variants must pass gfx1201 lowering, ISA, correctness and the 2%
+full-call threshold before any production selection. BN16 is not implemented
+in this round.
+
 WPE4 and further BM256 variants are deprioritized because the first sweep
 shows that WPE is not the current ceiling and larger query workgroups lose
 consistently.

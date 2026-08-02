@@ -94,3 +94,33 @@ def test_native_sage_v2_layout_and_bn(layout: str, block_n: int):
     )
     assert cosine.min().item() > 0.98
     assert cosine.mean().item() > 0.995
+
+
+@pytest.mark.parametrize("pre_load_v", [False, True])
+def test_native_sage_v2_bm64_v_preload(pre_load_v: bool):
+    torch.manual_seed(17)
+    shape = (1, 129, 3, 128)
+    q = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    ref = _reference(q, k, v)
+
+    out = flydsl_sage_attention_v2_func(
+        q,
+        k,
+        v,
+        config={
+            "BLOCK_M": 64,
+            "BLOCK_N": 32,
+            "waves_per_eu": 2,
+            "LDS_PADDING": 16,
+            "PRE_LOAD_V": pre_load_v,
+        },
+    )
+    cosine = F.cosine_similarity(
+        out.float().reshape(-1, 128),
+        ref.float().reshape(-1, 128),
+        dim=-1,
+    )
+    assert cosine.min().item() > 0.98
+    assert cosine.mean().item() > 0.995
