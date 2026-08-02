@@ -43,6 +43,8 @@ class SageAttentionGfx1201Config:
     waves_per_eu: int = 2
     lds_padding: int = 16
     pre_load_v: bool = False
+    kv_prefetch_mode: str = "none"
+    use_fp8_p_offset: bool = False
 
     @classmethod
     def from_mapping(
@@ -63,6 +65,18 @@ class SageAttentionGfx1201Config:
             pre_load_v=bool(
                 config.get("pre_load_v", config.get("PRE_LOAD_V", False))
             ),
+            kv_prefetch_mode=str(
+                config.get(
+                    "kv_prefetch_mode",
+                    config.get("KV_PREFETCH_MODE", "none"),
+                )
+            ).lower(),
+            use_fp8_p_offset=bool(
+                config.get(
+                    "use_fp8_p_offset",
+                    config.get("USE_FP8_P_OFFSET", False),
+                )
+            ),
         )
 
     def validate(self) -> None:
@@ -74,6 +88,16 @@ class SageAttentionGfx1201Config:
             raise ValueError("native gfx1201 Sage waves_per_eu must be in [1, 4]")
         if self.lds_padding not in (4, 8, 16):
             raise ValueError("native gfx1201 Sage LDS padding must be 4, 8, or 16")
+        if self.kv_prefetch_mode not in ("none", "v", "k", "kv"):
+            raise ValueError(
+                "native gfx1201 Sage KV prefetch mode must be none, v, k or kv"
+            )
+        if self.kv_prefetch_mode != "none" and (
+            self.block_m not in (64, 128) or self.block_n != 32
+        ):
+            raise ValueError(
+                "native gfx1201 Sage KV prefetch requires BM64/128 and BN32"
+            )
 
 
 @dataclass
@@ -158,12 +182,15 @@ def _get_kernel(
     waves_per_eu: int,
     lds_padding: int,
     pre_load_v: bool,
+    kv_prefetch_mode: str,
+    use_fp8_p_offset: bool,
 ):
     logger.info(
         "[FlyDSL] dispatching native gfx1201 SageAttention2: "
         f"dtype={output_dtype}, H={num_heads}, D=128, "
         f"BM={block_m}, BN={block_n}, WPE={waves_per_eu}, "
-        f"LDS_PAD={lds_padding}, PRE_LOAD_V={pre_load_v}"
+        f"LDS_PAD={lds_padding}, PRE_LOAD_V={pre_load_v}, "
+        f"KV_PREFETCH={kv_prefetch_mode}, FP8_P_OFFSET={use_fp8_p_offset}"
     )
     return build_sage_attention_v2_core(
         num_heads=num_heads,
@@ -174,6 +201,8 @@ def _get_kernel(
         waves_per_eu=waves_per_eu,
         lds_padding=lds_padding,
         pre_load_v=pre_load_v,
+        kv_prefetch_mode=kv_prefetch_mode,
+        use_fp8_p_offset=use_fp8_p_offset,
     )
 
 
@@ -361,6 +390,8 @@ def launch_prepared_sage_attention_v2_gfx1201(
             selected.waves_per_eu,
             selected.lds_padding,
             selected.pre_load_v,
+            selected.kv_prefetch_mode,
+            selected.use_fp8_p_offset,
         )
         kernel(
             prepared.q_int8,

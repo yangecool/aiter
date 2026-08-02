@@ -124,3 +124,41 @@ def test_native_sage_v2_bm64_v_preload(pre_load_v: bool):
     )
     assert cosine.min().item() > 0.98
     assert cosine.mean().item() > 0.995
+
+
+@pytest.mark.parametrize("kv_prefetch_mode", ["none", "v", "k", "kv"])
+@pytest.mark.parametrize("pre_load_v", [False, True])
+@pytest.mark.parametrize("use_fp8_p_offset", [False, True])
+def test_native_sage_v2_expert_pipeline_matrix(
+    kv_prefetch_mode: str,
+    pre_load_v: bool,
+    use_fp8_p_offset: bool,
+):
+    torch.manual_seed(29)
+    shape = (1, 257, 2, 128)
+    q = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    ref = _reference(q, k, v)
+
+    out = flydsl_sage_attention_v2_func(
+        q,
+        k,
+        v,
+        config={
+            "BLOCK_M": 128,
+            "BLOCK_N": 32,
+            "waves_per_eu": 2,
+            "LDS_PADDING": 16,
+            "PRE_LOAD_V": pre_load_v,
+            "KV_PREFETCH_MODE": kv_prefetch_mode,
+            "USE_FP8_P_OFFSET": use_fp8_p_offset,
+        },
+    )
+    cosine = F.cosine_similarity(
+        out.float().reshape(-1, 128),
+        ref.float().reshape(-1, 128),
+        dim=-1,
+    )
+    assert cosine.min().item() > 0.98
+    assert cosine.mean().item() > 0.995

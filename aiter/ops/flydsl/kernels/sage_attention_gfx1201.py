@@ -50,6 +50,7 @@ _PV_PROBE_NAME = "sage_gfx1201_pv_fp8_wmma_16x16x16"
 _QK_ISA = "v_wmma_i32_16x16x16_iu8"
 _PV_ISA = "v_wmma_f32_16x16x16_fp8_fp8"
 _LOG2E = host_math.log2(host_math.e)
+_FP8_P_OFFSET = 8.807
 
 
 def _raw(value):
@@ -197,6 +198,8 @@ def build_sage_attention_v2_core(
     waves_per_eu: int = 2,
     lds_padding: int = 16,
     pre_load_v: bool = False,
+    kv_prefetch_mode: str = "none",
+    use_fp8_p_offset: bool = False,
 ):
     """Build the pre-quantized, non-causal gfx1201 SageAttention2 core.
 
@@ -222,6 +225,13 @@ def build_sage_attention_v2_core(
         raise ValueError("Sage block_n must be 32 or 64")
     if lds_padding not in (4, 8, 16):
         raise ValueError("Sage lds_padding must be 4, 8, or 16")
+    kv_prefetch_mode = str(kv_prefetch_mode).lower()
+    if kv_prefetch_mode not in ("none", "v", "k", "kv"):
+        raise ValueError("Sage KV prefetch mode must be none, v, k or kv")
+    if kv_prefetch_mode != "none" and (
+        block_m not in (64, 128) or block_n != 32
+    ):
+        raise ValueError("Sage KV prefetch requires BM64/128 and BN32")
 
     WARP_SIZE = GFX1201_WAVE_SIZE
     WMMA_K = GFX1201_WMMA_K
@@ -234,6 +244,9 @@ def build_sage_attention_v2_core(
     BLOCK_M = int(block_m)
     BLOCK_N = int(block_n)
     PRE_LOAD_V = bool(pre_load_v)
+    PREFETCH_K = kv_prefetch_mode in ("k", "kv")
+    PREFETCH_V = kv_prefetch_mode in ("v", "kv")
+    USE_FP8_P_OFFSET = bool(use_fp8_p_offset)
     BLOCK_SIZE = (BLOCK_M // ROWS_PER_WAVE) * WARP_SIZE
     NUM_WAVES = BLOCK_M // ROWS_PER_WAVE
     N_SUB_TILES = BLOCK_N // K_SUB_N
@@ -256,11 +269,15 @@ def build_sage_attention_v2_core(
     V_CHUNKS_PER_ROW = BLOCK_N // VEC_WIDTH
     V_LOAD_ITEMS = head_dim * V_CHUNKS_PER_ROW
     V_LOAD_BATCHES = (V_LOAD_ITEMS + BLOCK_SIZE - 1) // BLOCK_SIZE
+    K_PREFETCH_STATE_BASE = 2 + D_CHUNKS
+    V_PREFETCH_STATE_BASE = K_PREFETCH_STATE_BASE + (
+        K_LOAD_BATCHES if PREFETCH_K else 0
+    )
 
     gpu_arch = os.environ.get("FLYDSL_GPU_ARCH", "gfx1201")
     path_tag = (
         f"M{BLOCK_M}N{BLOCK_N}P{lds_padding}W{waves_per_eu}H{num_heads}"
-        f"V{int(PRE_LOAD_V)}"
+        f"V{int(PRE_LOAD_V)}G{kv_prefetch_mode}O{int(USE_FP8_P_OFFSET)}"
     )
     allocator = SmemAllocator(
         None,
@@ -427,11 +444,64 @@ def build_sage_attention_v2_core(
         c_one_f = fx.Float32(1.0)
         c_zero_v8f32 = Vec.filled(8, 0.0, fx.Float32).ir_value()
         c_zero_v8i32 = Vec.filled(8, 0, fx.Int32).ir_value()
+        c_neg_fp8_p_offset = fx.Float32(-_FP8_P_OFFSET)
         width_i32 = fx.Int32(WARP_SIZE)
         peer_i32 = fx.Int32(16)
 
         def reduction_peer(value):
             return fx.Float32(value).shuffle_xor(peer_i32, width_i32)
+
+        def _load_k_tile_global(tile_start):
+            fragments = []
+            for load_batch in range_constexpr(K_LOAD_BATCHES):
+                k_item = tid + load_batch * BLOCK_SIZE
+                k_row = k_item // K_THREADS_PER_ROW
+                k_col = (k_item % K_THREADS_PER_ROW) * VEC_WIDTH
+                fragments.append(
+                    _global_load(
+                        k_ptr,
+                        qk_global_index(tile_start + k_row, k_col),
+                        T.i8,
+                        v16i8_type,
+                    )
+                )
+            return fragments
+
+        def _store_k_tile_lds(fragments):
+            for load_batch in range_constexpr(K_LOAD_BATCHES):
+                k_item = tid + load_batch * BLOCK_SIZE
+                k_row = k_item // K_THREADS_PER_ROW
+                k_col = (k_item % K_THREADS_PER_ROW) * VEC_WIDTH
+                Vec(fragments[load_batch]).store(
+                    lds,
+                    [k_row * K_STRIDE + k_col],
+                )
+
+        def _load_v_tile_global(tile_start):
+            fragments = []
+            for load_batch in range_constexpr(V_LOAD_BATCHES):
+                v_item = tid + load_batch * BLOCK_SIZE
+                d_row = v_item // V_CHUNKS_PER_ROW
+                token_offset = (v_item % V_CHUNKS_PER_ROW) * VEC_WIDTH
+                fragments.append(
+                    _global_load(
+                        v_ptr,
+                        v_global_index(d_row, tile_start + token_offset),
+                        T.i8,
+                        v16i8_type,
+                    )
+                )
+            return fragments
+
+        def _store_v_tile_lds(fragments):
+            for load_batch in range_constexpr(V_LOAD_BATCHES):
+                v_item = tid + load_batch * BLOCK_SIZE
+                d_row = v_item // V_CHUNKS_PER_ROW
+                token_offset = (v_item % V_CHUNKS_PER_ROW) * VEC_WIDTH
+                Vec(fragments[load_batch]).store(
+                    lds,
+                    [LDS_V_BASE + d_row * V_STRIDE + token_offset],
+                )
 
         def _load_v_fragment(st_idx, pks, dc):
             d_pos = fx.Index(dc * GFX1201_WMMA_N) + lane16
@@ -446,46 +516,96 @@ def build_sage_attention_v2_core(
                 [LDS_V_BASE + d_pos * V_STRIDE + token_pos],
             )
 
+        initial_k_prefetch = []
+        if const_expr(PREFETCH_K):
+            initial_k_prefetch = _load_k_tile_global(fx.Index(0))
+        initial_v_prefetch = []
+        if const_expr(PREFETCH_V):
+            initial_v_prefetch = _load_v_tile_global(fx.Index(0))
+
         init_args = [_raw(c_neg_inf), _raw(c_zero_f)]
         for _ in range_constexpr(D_CHUNKS):
             init_args.append(c_zero_v8f32)
+        if const_expr(PREFETCH_K):
+            for load_batch in range_constexpr(K_LOAD_BATCHES):
+                init_args.append(initial_k_prefetch[load_batch])
+        if const_expr(PREFETCH_V):
+            for load_batch in range_constexpr(V_LOAD_BATCHES):
+                init_args.append(initial_v_prefetch[load_batch])
 
         loop_results = init_args
         for kv_start, inner in range(0, seq, BLOCK_N, init=init_args):
             m_running = inner[0]
             l_running = inner[1]
             o_accs = [inner[2 + dc] for dc in range_constexpr(D_CHUNKS)]
+            current_k_prefetch = []
+            if const_expr(PREFETCH_K):
+                current_k_prefetch = [
+                    inner[K_PREFETCH_STATE_BASE + load_batch]
+                    for load_batch in range_constexpr(K_LOAD_BATCHES)
+                ]
+            current_v_prefetch = []
+            if const_expr(PREFETCH_V):
+                current_v_prefetch = [
+                    inner[V_PREFETCH_STATE_BASE + load_batch]
+                    for load_batch in range_constexpr(V_LOAD_BATCHES)
+                ]
 
-            for load_batch in range_constexpr(K_LOAD_BATCHES):
-                k_item = tid + load_batch * BLOCK_SIZE
-                if k_item < K_LOAD_ITEMS:
-                    k_row = k_item // K_THREADS_PER_ROW
-                    k_col = (k_item % K_THREADS_PER_ROW) * VEC_WIDTH
-                    k_vec = _global_load(
-                        k_ptr,
-                        qk_global_index(kv_start + k_row, k_col),
-                        T.i8,
-                        v16i8_type,
-                    )
-                    Vec(k_vec).store(lds, [k_row * K_STRIDE + k_col])
+            if const_expr(PREFETCH_K):
+                _store_k_tile_lds(current_k_prefetch)
+            else:
+                for load_batch in range_constexpr(K_LOAD_BATCHES):
+                    k_item = tid + load_batch * BLOCK_SIZE
+                    if k_item < K_LOAD_ITEMS:
+                        k_row = k_item // K_THREADS_PER_ROW
+                        k_col = (k_item % K_THREADS_PER_ROW) * VEC_WIDTH
+                        k_vec = _global_load(
+                            k_ptr,
+                            qk_global_index(kv_start + k_row, k_col),
+                            T.i8,
+                            v16i8_type,
+                        )
+                        Vec(k_vec).store(lds, [k_row * K_STRIDE + k_col])
 
-            for load_batch in range_constexpr(V_LOAD_BATCHES):
-                v_item = tid + load_batch * BLOCK_SIZE
-                if v_item < V_LOAD_ITEMS:
-                    d_row = v_item // V_CHUNKS_PER_ROW
-                    token_offset = (v_item % V_CHUNKS_PER_ROW) * VEC_WIDTH
-                    v_vec = _global_load(
-                        v_ptr,
-                        v_global_index(d_row, kv_start + token_offset),
-                        T.i8,
-                        v16i8_type,
-                    )
-                    Vec(v_vec).store(
-                        lds,
-                        [LDS_V_BASE + d_row * V_STRIDE + token_offset],
-                    )
+            if const_expr(PREFETCH_V):
+                _store_v_tile_lds(current_v_prefetch)
+            else:
+                for load_batch in range_constexpr(V_LOAD_BATCHES):
+                    v_item = tid + load_batch * BLOCK_SIZE
+                    if v_item < V_LOAD_ITEMS:
+                        d_row = v_item // V_CHUNKS_PER_ROW
+                        token_offset = (v_item % V_CHUNKS_PER_ROW) * VEC_WIDTH
+                        v_vec = _global_load(
+                            v_ptr,
+                            v_global_index(d_row, kv_start + token_offset),
+                            T.i8,
+                            v16i8_type,
+                        )
+                        Vec(v_vec).store(
+                            lds,
+                            [LDS_V_BASE + d_row * V_STRIDE + token_offset],
+                        )
 
             gpu.barrier()
+
+            # Keep next-tile VMEM values live while this tile computes, then
+            # commit them to the same LDS buffer at the next iteration.
+            next_k_prefetch = []
+            next_v_prefetch = []
+            if const_expr(PREFETCH_K or PREFETCH_V):
+                next_kv_start = kv_start + BLOCK_N
+                next_in_bounds = arith.cmpi(
+                    arith.CmpIPredicate.slt,
+                    _raw(next_kv_start),
+                    _raw(seq),
+                )
+                safe_next_kv_start = fx.Index(
+                    ArithValue(next_in_bounds).select(next_kv_start, fx.Index(0))
+                )
+                if const_expr(PREFETCH_K):
+                    next_k_prefetch = _load_k_tile_global(safe_next_kv_start)
+                if const_expr(PREFETCH_V):
+                    next_v_prefetch = _load_v_tile_global(safe_next_kv_start)
 
             s_accs = [c_zero_v8i32 for _ in range(NUM_S_ACCS)]
             for ks in range_constexpr(K_STEPS_QK):
@@ -525,11 +645,12 @@ def build_sage_attention_v2_core(
             k_scale = _global_load(ks_ptr, k_scale_index, T.f32, T.f32)
             score_scale = _fmul(q_scale, k_scale)
 
-            scores = []
+            # Quantization scales are non-negative, so max can be reduced in
+            # the raw score domain and scaled once per tile.
+            raw_scores = []
             for st in range_constexpr(NUM_S_ACCS):
                 for item in range_constexpr(8):
                     score_f32 = arith.sitofp(T.f32, Vec(s_accs[st])[item])
-                    score = _fmul(score_f32, score_scale)
                     key_offset = (
                         (st // 2) * K_SUB_N
                         + (st % 2) * ROWS_PER_WAVE
@@ -541,14 +662,27 @@ def build_sage_attention_v2_core(
                         _raw(kv_start + key_offset),
                         _raw(valid_seq),
                     )
-                    scores.append(
-                        ArithValue(key_in_bounds).select(score, c_neg_inf)
+                    raw_scores.append(
+                        ArithValue(key_in_bounds).select(score_f32, c_neg_inf)
                     )
 
-            local_max = scores[0]
+            local_max_raw = raw_scores[0]
             for item in range_constexpr(NUM_S_VALS - 1):
-                local_max = _fmax(local_max, scores[item + 1])
-            row_max = _fmax(local_max, reduction_peer(local_max))
+                local_max_raw = _fmax(local_max_raw, raw_scores[item + 1])
+            row_max_raw = _fmax(
+                local_max_raw,
+                reduction_peer(local_max_raw),
+            )
+            row_max_offset = c_zero_f
+            if const_expr(USE_FP8_P_OFFSET):
+                # Sage's 8.807 offset nearly fills E4M3 without crossing 448.
+                # The same factor enters P and L, so normalization cancels it.
+                row_max_offset = c_neg_fp8_p_offset
+            row_max = fmath.fma(
+                row_max_raw,
+                _raw(score_scale),
+                _raw(row_max_offset),
+            )
             m_new = _fmax(m_running, row_max)
             corr = rocdl.exp2(
                 T.f32,
@@ -559,7 +693,11 @@ def build_sage_attention_v2_core(
             local_sum = _raw(c_zero_f)
             neg_m_new = _fsub(c_zero_f, m_new)
             for item in range_constexpr(NUM_S_VALS):
-                shifted = fmath.fma(scores[item], _raw(c_one_f), neg_m_new)
+                shifted = fmath.fma(
+                    raw_scores[item],
+                    _raw(score_scale),
+                    neg_m_new,
+                )
                 probability = rocdl.exp2(T.f32, _raw(shifted))
                 p_values.append(probability)
                 local_sum = _fadd(local_sum, probability)
@@ -626,7 +764,14 @@ def build_sage_attention_v2_core(
             gpu.barrier()
             m_running = m_new
             l_running = l_new
-            loop_results = yield [m_running, l_running] + o_accs
+            next_args = [m_running, l_running] + o_accs
+            if const_expr(PREFETCH_K):
+                for load_batch in range_constexpr(K_LOAD_BATCHES):
+                    next_args.append(next_k_prefetch[load_batch])
+            if const_expr(PREFETCH_V):
+                for load_batch in range_constexpr(V_LOAD_BATCHES):
+                    next_args.append(next_v_prefetch[load_batch])
+            loop_results = yield next_args
 
         inv_l = arith.divf(
             _raw(c_one_f),

@@ -226,6 +226,42 @@ WPE4 and further BM256 variants are deprioritized because the first sweep
 shows that WPE is not the current ceiling and larger query workgroups lose
 consistently.
 
+### 6.2 Expert pipeline sweep
+
+The first winner's disassembly closed two ISA questions before further code
+changes: it already contains eight `V_MAX3_NUM_F32` instructions and no
+`V_NOP`. Explicit max3 bindings and manual WMMA hazard padding are therefore
+not part of this round.
+
+The next implementation round keeps `BM128/BN32/WPE2/LDS_PAD16` fixed and
+adds three independent controls:
+
+| Control | Values | Purpose |
+| --- | --- | --- |
+| `KV_PREFETCH_MODE` | `none`, `v`, `k`, `kv` | carry the next tile's vector VMEM loads in registers across current QK/softmax/PV work |
+| `PRE_LOAD_V` | `false`, `true` | test explicit LDS-to-register software pipelining before FP8 PV WMMA |
+| `USE_FP8_P_OFFSET` | `false`, `true` | shift the online max by `-log2(448)` so P uses the E4M3 finite range |
+
+This is a 16-candidate local sweep. The K/V pipeline keeps one LDS buffer and
+the existing two logical barriers: next-tile global values are issued after
+the first barrier, remain live during current-tile compute, and are stored to
+LDS only after the previous iteration's final barrier. `none`, `v`, `k`, and
+`kv` remain separate because extra live VGPRs can outweigh hidden VMEM latency.
+
+Softmax now reduces the unscaled I32-to-F32 scores first and uses FMA for
+`raw_score * score_scale - m_new`. With FP8 P offset enabled, both P and the
+online denominator receive the same factor, which cancels during final `O / L`
+normalization. The implementation uses SageAttention's literal `8.807f`
+offset, producing a peak near 447.89 with a small conversion margin below 448.
+That limit matches Aiter's gfx1201 mapping to OCP `torch.float8_e4m3fn`; it must
+not be replaced by the 240 limit used by E4M3 FNUZ on older AMD targets. K
+scale still changes per BN tile, so the running max remains in the scaled
+domain.
+
+The production default remains the first measured winner until all 16 variants
+pass lowering, tail correctness, native-instruction ISA checks, and the three
+720P full-call benchmarks.
+
 ## 7. Aiter Integration Boundary
 
 New code should be isolated under the existing FlyDSL ownership boundary:
@@ -320,6 +356,10 @@ Exit gate: LightX2V can select the native path without API changes.
 
 ### Phase 4: schedule and fusion optimization
 
+Status: the first K/V register-carried VMEM pipeline, optional PV LDS preload,
+raw-score FMA softmax, and FP8 P offset are implemented behind tuning controls;
+gfx1201 correctness, final ISA, resource use, and performance are pending.
+
 - Pipeline K/V VMEM and LDS traffic across KV iterations.
 - Interleave useful instructions to satisfy WMMA hazard spacing.
 - Tune BM/BN/NW/WPE, LDS layout, prefetch distance and PV buffer interval.
@@ -350,11 +390,14 @@ those branches.
 
 The executable GPU gate lives in `aiter-tune-gfx1201`:
 
-- `tune/tune_sage_attention_v2_gfx1201.py` checks tail lengths 31/33/63/65/257,
-  exact WMMA/conversion ISA, kernel-only latency and full-call latency;
+- `tune/tune_sage_attention_v2_gfx1201.py` checks tail lengths
+  31/33/63/65/257/1025, exact WMMA/conversion ISA, normalized instruction
+  hashes, kernel-only latency and full-call latency;
 - `tune/launch_sage_attention_v2_tuning.sh` validates the Aiter revision baked
   into a prebuilt image on tune hosts without an Aiter checkout or source
   mount;
+- `tune/launch_sage_attention_v2_expert_tuning.sh` forces image-only execution
+  of correctness, ISA, and the complete 16-candidate 720P expert sweep;
 - the 720P sweep compares native V2 with FlyDSL BF16 as the primary baseline
   and Triton Sage v1 as the secondary baseline.
 
@@ -403,14 +446,13 @@ The executable GPU gate lives in `aiter-tune-gfx1201`:
 
 ## 12. Immediate Work Order
 
-1. Run the image-only LightX2V integration gate against the already validated
-   image and confirm native self-attention plus BF16 cross-attention routing.
-2. Generate representative Wan2.1 and Wan2.2 720P videos and compare quality,
+1. Build an image from the new Aiter revision and run the 16-candidate expert
+   correctness, ISA and 720P sweep in Section 6.2.
+2. Promote a pipeline variant only if its full-call geomean gain is repeatable
+   and its VGPR/resource growth does not create a workload-specific regression.
+3. Run the image-only LightX2V integration gate and confirm native
+   self-attention plus BF16 cross-attention routing.
+4. Generate representative Wan2.1 and Wan2.2 720P videos and compare quality,
    peak memory and end-to-end DiT latency with the BF16 baseline.
-3. Run the focused BM64, LDS padding and V-register-preload sweep described in
-   Section 6.1; require at least a repeatable 2% full-call gain before changing
-   the frozen default.
-4. Treat BN16 as an isolated prototype and retain it only if reduced resource
-   pressure outweighs the doubled KV-loop/barrier count.
 5. Keep short cross-attention on the tuned BF16 path unless an asymmetric V2
    implementation independently passes correctness and full-call gates.

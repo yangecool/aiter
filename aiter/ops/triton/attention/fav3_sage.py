@@ -348,7 +348,8 @@ def fav3_sage_wrapper_func(
         return_lse: return softmax_lse if True, otherwise return None
         layout: bshd or bhsd layout for the inputs
         config: Optional kernel configuration dict with keys BLOCK_M, BLOCK_N,
-                waves_per_eu, PRE_LOAD_V, num_stages, num_warps
+                waves_per_eu, PRE_LOAD_V, KV_PREFETCH_MODE,
+                USE_FP8_P_OFFSET, num_stages, num_warps
         block_lut: Optional ragged LUT for block-sparse attention,
                 (kv_block_indices, lut_start, lut_count) from block_attn_mask_to_ragged_lut.
                 When None, dense attention is used.
