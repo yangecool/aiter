@@ -258,9 +258,23 @@ not be replaced by the 240 limit used by E4M3 FNUZ on older AMD targets. K
 scale still changes per BN tile, so the running max remains in the scaled
 domain.
 
-The production default remains the first measured winner until all 16 variants
-pass lowering, tail correctness, native-instruction ISA checks, and the three
-720P full-call benchmarks.
+All 16 variants passed lowering, tail correctness and native-instruction ISA
+checks. The three-workload 720P sweep selected K-only prefetch with
+`PRE_LOAD_V=false`: kernel geomean reached `1.3840x` and full-call geomean
+reached `1.3087x` versus tuned FlyDSL BF16. V-only prefetch regressed, K+V was
+slightly behind K-only, and `PRE_LOAD_V` lowered to the same final ISA for each
+otherwise-identical configuration.
+
+A separate sampled-row FP32 validation covered both 75,600-token H5 and
+109,120-token H3 720P shapes over six workload/seed cases. Enabling the FP8 P
+offset improved cosine in 6/6 cases, reduced RMSE in 6/6 cases, and reduced
+mean normalized P L1 error from approximately `0.03242` to `0.02250`. Its
+full-call geomean speed was `0.99584x` versus offset-disabled, a `0.42%` cost.
+The quality result is consistent and the offset matches SageAttention2 on
+SM89, so the production default is now `BM128/BN32/WPE2/LDS_PAD16`, K-only
+prefetch, `PRE_LOAD_V=false`, and `USE_FP8_P_OFFSET=true`. This selected default
+still reaches approximately `1.3062x` full-call geomean versus tuned FlyDSL
+BF16.
 
 ## 7. Aiter Integration Boundary
 
@@ -356,9 +370,10 @@ Exit gate: LightX2V can select the native path without API changes.
 
 ### Phase 4: schedule and fusion optimization
 
-Status: the first K/V register-carried VMEM pipeline, optional PV LDS preload,
-raw-score FMA softmax, and FP8 P offset are implemented behind tuning controls;
-gfx1201 correctness, final ISA, resource use, and performance are pending.
+Status: the K/V register-carried VMEM pipeline, optional PV LDS preload,
+raw-score FMA softmax, and FP8 P offset are implemented and validated. K-only
+prefetch plus FP8 P offset is the measured production selection; alternate
+paths remain explicit tuning controls.
 
 - Pipeline K/V VMEM and LDS traffic across KV iterations.
 - Interleave useful instructions to satisfy WMMA hazard spacing.

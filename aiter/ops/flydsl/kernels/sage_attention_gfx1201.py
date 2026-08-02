@@ -198,8 +198,8 @@ def build_sage_attention_v2_core(
     waves_per_eu: int = 2,
     lds_padding: int = 16,
     pre_load_v: bool = False,
-    kv_prefetch_mode: str = "none",
-    use_fp8_p_offset: bool = False,
+    kv_prefetch_mode: str | None = None,
+    use_fp8_p_offset: bool = True,
 ):
     """Build the pre-quantized, non-causal gfx1201 SageAttention2 core.
 
@@ -225,6 +225,8 @@ def build_sage_attention_v2_core(
         raise ValueError("Sage block_n must be 32 or 64")
     if lds_padding not in (4, 8, 16):
         raise ValueError("Sage lds_padding must be 4, 8, or 16")
+    if kv_prefetch_mode is None:
+        kv_prefetch_mode = "k" if (block_m, block_n) == (128, 32) else "none"
     kv_prefetch_mode = str(kv_prefetch_mode).lower()
     if kv_prefetch_mode not in ("none", "v", "k", "kv"):
         raise ValueError("Sage KV prefetch mode must be none, v, k or kv")

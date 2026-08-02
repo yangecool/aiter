@@ -43,8 +43,8 @@ class SageAttentionGfx1201Config:
     waves_per_eu: int = 2
     lds_padding: int = 16
     pre_load_v: bool = False
-    kv_prefetch_mode: str = "none"
-    use_fp8_p_offset: bool = False
+    kv_prefetch_mode: str = "k"
+    use_fp8_p_offset: bool = True
 
     @classmethod
     def from_mapping(
@@ -53,9 +53,12 @@ class SageAttentionGfx1201Config:
     ) -> "SageAttentionGfx1201Config":
         if config is None:
             return cls()
+        block_m = int(config.get("BLOCK_M", config.get("block_m", 128)))
+        block_n = int(config.get("BLOCK_N", config.get("block_n", 32)))
+        default_prefetch = "k" if (block_m, block_n) == (128, 32) else "none"
         return cls(
-            block_m=int(config.get("BLOCK_M", config.get("block_m", 128))),
-            block_n=int(config.get("BLOCK_N", config.get("block_n", 32))),
+            block_m=block_m,
+            block_n=block_n,
             waves_per_eu=int(
                 config.get("waves_per_eu", config.get("WAVES_PER_EU", 2))
             ),
@@ -68,13 +71,13 @@ class SageAttentionGfx1201Config:
             kv_prefetch_mode=str(
                 config.get(
                     "kv_prefetch_mode",
-                    config.get("KV_PREFETCH_MODE", "none"),
+                    config.get("KV_PREFETCH_MODE", default_prefetch),
                 )
             ).lower(),
             use_fp8_p_offset=bool(
                 config.get(
                     "use_fp8_p_offset",
-                    config.get("USE_FP8_P_OFFSET", False),
+                    config.get("USE_FP8_P_OFFSET", True),
                 )
             ),
         )
