@@ -303,11 +303,13 @@ The initial support predicate is intentionally narrow:
 - causal and non-causal handled only after each passes its own test gate;
 - self-attention, GQA and cross-attention enabled independently as they pass.
 
-The bring-up path is opt-in with `AITER_SAGE_GFX1201_NATIVE=1` or
-`config={"backend": "flydsl_v2"}`. This acts as the pre-production kill switch:
-unsupported calls and default calls retain Triton v1 until hardware correctness
-and full-call performance pass. The Triton kernel remains callable explicitly
-for A/B measurements and rollback.
+The canonical explicit selector is
+`config={"backend": "sage_attn_v2_gfx1201"}`. The older `flydsl_v2` and `native_v2`
+names remain compatibility aliases, while `AITER_SAGE_GFX1201_NATIVE=1` remains
+available for process-wide A/B tests. LightX2V uses the canonical selector and
+validates the native support contract before dispatch, so its production Sage
+route cannot silently fall back to Triton v1. The Triton kernel remains callable
+through the compatibility entry for A/B measurements and rollback.
 
 ## 8. Implementation Phases
 

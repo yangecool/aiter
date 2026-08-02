@@ -18,7 +18,11 @@ from aiter.ops.triton.utils._triton import arch_info
 
 
 _GFX1201_NATIVE_ENV = "AITER_SAGE_GFX1201_NATIVE"
-_GFX1201_NATIVE_BACKENDS = ("flydsl_v2", "native_v2")
+_GFX1201_NATIVE_BACKENDS = (
+    "sage_attn_v2_gfx1201",
+    "flydsl_v2",
+    "native_v2",
+)
 
 
 def _native_gfx1201_requested(config: Optional[dict]) -> tuple[bool, bool]:
@@ -326,8 +330,8 @@ def fav3_sage_wrapper_func(
     """
     High-precision SageAttention compatibility entry point.
 
-    The experimental gfx1201 native V2 path is selected with
-    ``AITER_SAGE_GFX1201_NATIVE=1`` or ``config={"backend": "flydsl_v2"}``.
+    The native V2 path is selected with ``AITER_SAGE_GFX1201_NATIVE=1`` or
+    ``config={"backend": "sage_attn_v2_gfx1201"}``.
     Unsupported calls and the default path continue to use Triton Sage v1.
 
     This API is designed for seamless integration with existing training code
@@ -347,9 +351,11 @@ def fav3_sage_wrapper_func(
         sm_margin: SM margin parameter (not yet supported)
         return_lse: return softmax_lse if True, otherwise return None
         layout: bshd or bhsd layout for the inputs
-        config: Optional kernel configuration dict with keys BLOCK_M, BLOCK_N,
+        config: Optional kernel configuration dict with backend
+                ``sage_attn_v2_gfx1201`` and tuning keys BLOCK_M, BLOCK_N,
                 waves_per_eu, PRE_LOAD_V, KV_PREFETCH_MODE,
-                USE_FP8_P_OFFSET, num_stages, num_warps
+                USE_FP8_P_OFFSET, num_stages, num_warps. The legacy backend
+                names ``flydsl_v2`` and ``native_v2`` remain aliases.
         block_lut: Optional ragged LUT for block-sparse attention,
                 (kv_block_indices, lut_start, lut_count) from block_attn_mask_to_ragged_lut.
                 When None, dense attention is used.

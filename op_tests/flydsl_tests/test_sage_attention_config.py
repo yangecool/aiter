@@ -12,6 +12,7 @@ from typing import Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPO_ROOT / "aiter/ops/flydsl/sage_attention.py"
+WRAPPER_PATH = REPO_ROOT / "aiter/ops/triton/attention/fav3_sage.py"
 SOURCE = CONFIG_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE)
 CONFIG_CLASS = next(
@@ -31,6 +32,22 @@ CONFIG = NAMESPACE["SageAttentionGfx1201Config"]
 
 
 class SageAttentionGfx1201ConfigTests(unittest.TestCase):
+    def test_canonical_backend_names_sage_and_target_arch(self):
+        wrapper_tree = ast.parse(WRAPPER_PATH.read_text(encoding="utf-8"))
+        backends = next(
+            ast.literal_eval(node.value)
+            for node in wrapper_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "_GFX1201_NATIVE_BACKENDS"
+                for target in node.targets
+            )
+        )
+        self.assertEqual(backends[0], "sage_attn_v2_gfx1201")
+        self.assertIn("flydsl_v2", backends)
+        self.assertIn("native_v2", backends)
+
     def test_production_default_uses_k_prefetch_and_fp8_offset(self):
         config = CONFIG()
         self.assertEqual((config.block_m, config.block_n), (128, 32))
@@ -40,7 +57,7 @@ class SageAttentionGfx1201ConfigTests(unittest.TestCase):
         config.validate()
 
     def test_partial_winner_mapping_uses_production_schedule(self):
-        config = CONFIG.from_mapping({"backend": "flydsl_v2"})
+        config = CONFIG.from_mapping({"backend": "sage_attn_v2_gfx1201"})
         self.assertEqual(config.kv_prefetch_mode, "k")
         self.assertTrue(config.use_fp8_p_offset)
         config.validate()
